@@ -291,6 +291,21 @@ class PromptEditDialog {
     );
     layout.add(slotTitle, { x_fill: true });
 
+    const slotHint = new St.Label({
+      text:
+        _("Optional — link this prompt to a number below.") +
+        " " +
+        HOTKEY_COMBO_LABEL +
+        _("1–9 pastes it into the text field you are typing in.") +
+        " " +
+        _("None means no hotkey.") +
+        " " +
+        _("Click Shortcuts in the desklet toolbar once to install the keys."),
+      style_class: "prompt-vault-hint prompt-vault-dialog-slot-hint",
+    });
+    slotHint.clutter_text.line_wrap = true;
+    layout.add(slotHint, { x_fill: true });
+
     this._selectedSlot = 0;
     this._slotChips = [];
     const mkSlotChip = (parent, label, value) => {
