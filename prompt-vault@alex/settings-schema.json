@@ -1,0 +1,80 @@
+{
+  "head-storage": {
+    "type": "header",
+    "description": "Storage & backup"
+  },
+  "data_dir": {
+    "type": "entry",
+    "default": "",
+    "description": "Data folder",
+    "tooltip": "Where prompts.json and backups are stored. Leave empty to use ~/.local/share/prompt-vault@alex/. You may use ~ for your home folder. Put a file named import.json here to import it."
+  },
+  "auto_backup": {
+    "type": "switch",
+    "default": true,
+    "description": "Keep a rolling backup on every change",
+    "tooltip": "Maintains prompts.auto-backup.json next to your data so a save can never lose your previous state."
+  },
+  "head-behaviour": {
+    "type": "header",
+    "description": "Behaviour"
+  },
+  "enable_templates": {
+    "type": "switch",
+    "default": true,
+    "description": "Fill {{placeholders}} when copying",
+    "tooltip": "If a prompt contains {{name}} markers, you'll be asked to fill them in before the text is copied."
+  },
+  "confirm_delete": {
+    "type": "switch",
+    "default": true,
+    "description": "Ask before deleting a prompt",
+    "tooltip": "Show a confirmation dialog before a prompt is removed."
+  },
+  "sort_mode": {
+    "type": "radiogroup",
+    "default": "recent",
+    "description": "Sort prompts by",
+    "tooltip": "Favorites always appear first.",
+    "options": {
+      "Recently used": "recent",
+      "Title (A–Z)": "title",
+      "Category": "category",
+      "Most copied": "uses"
+    }
+  },
+  "head-display": {
+    "type": "header",
+    "description": "Display"
+  },
+  "show_tags": {
+    "type": "switch",
+    "default": true,
+    "description": "Show tags on each prompt",
+    "tooltip": "Display the prompt's tags in the list."
+  },
+  "show_usage": {
+    "type": "switch",
+    "default": true,
+    "description": "Show how often each prompt is copied",
+    "tooltip": "Display a small 'Copied N×' line under each prompt."
+  },
+  "panel_width": {
+    "type": "scale",
+    "default": 340,
+    "min": 260,
+    "max": 640,
+    "step": 10,
+    "description": "Desklet width (px)",
+    "tooltip": "Overall width of the desklet."
+  },
+  "list_height": {
+    "type": "scale",
+    "default": 300,
+    "min": 140,
+    "max": 720,
+    "step": 20,
+    "description": "Prompt list height (px)",
+    "tooltip": "Height of the scrollable prompt list."
+  }
+}
