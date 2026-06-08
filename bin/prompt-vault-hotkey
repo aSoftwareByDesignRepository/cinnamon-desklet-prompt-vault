@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Copyright (C) 2026 Alexander Mäule <alex@software-by-design.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Entry point for Cinnamon custom shortcuts — copies + pastes a prompt slot.
+set -euo pipefail
+
+COPY_CMD="${PROMPT_VAULT_COPY_CMD:-${HOME}/.local/bin/prompt-vault-copy}"
+SLOT="${1:-}"
+
+if [[ ! "${SLOT}" =~ ^[1-9]$ ]]; then
+  echo "usage: prompt-vault-hotkey <slot 1-9>" >&2
+  exit 2
+fi
+
+if [[ ! -x "${COPY_CMD}" ]]; then
+  echo "error: prompt-vault-copy not found: ${COPY_CMD}" >&2
+  exit 1
+fi
+
+# Session vars are often missing when Cinnamon spawns custom shortcut commands.
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}"
+if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+  export DISPLAY=":0"
+fi
+
+# Wait for the hotkey chord (Super/Ctrl/Shift) to release before simulating Ctrl+V.
+sleep 0.15
+
+exec "${COPY_CMD}" --slot "${SLOT}" --paste --quiet

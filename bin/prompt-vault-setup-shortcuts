@@ -1,16 +1,36 @@
 #!/usr/bin/env bash
 # Copyright (C) 2026 Alexander Mäule <alex@software-by-design.de>
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Register Cinnamon keyboard shortcuts Super+Shift+1 … 9 for Prompt Vault slots.
+# Register Cinnamon keyboard shortcuts for Prompt Vault slots 1–9.
 set -euo pipefail
 
-COPY_CMD="${PROMPT_VAULT_COPY_CMD:-${HOME}/.local/bin/prompt-vault-copy}"
+HOTKEY_CMD="${PROMPT_VAULT_HOTKEY_CMD:-${HOME}/.local/bin/prompt-vault-hotkey}"
 DATA_DIR="${PROMPT_VAULT_DATA_DIR:-}"
 KEYBIND_SCHEMA="org.cinnamon.desktop.keybindings"
 CUSTOM_LIST_KEY="custom-list"
+# Super+Ctrl+1–9 avoids conflicts with Super+1–9 (app switch) and Super+Shift+* (Mint/Cinnamon).
+KEY_COMBO="${PROMPT_VAULT_KEY_COMBO:-Super+Ctrl}"
 
-if [[ ! -x "${COPY_CMD}" ]]; then
-  echo "error: prompt-vault-copy not found or not executable: ${COPY_CMD}" >&2
+usage() {
+  cat <<EOF
+Usage: prompt-vault-setup-shortcuts
+
+Registers Cinnamon custom shortcuts (default: Super+Ctrl+1 … Super+Ctrl+9).
+Override combo: PROMPT_VAULT_KEY_COMBO='Super+Alt' $0
+
+Environment:
+  PROMPT_VAULT_HOTKEY_CMD   path to prompt-vault-hotkey
+  PROMPT_VAULT_DATA_DIR     custom prompts data directory
+EOF
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ ! -x "${HOTKEY_CMD}" ]]; then
+  echo "error: prompt-vault-hotkey not found or not executable: ${HOTKEY_CMD}" >&2
   echo "Run ./install.sh from the prompt-vault repo first." >&2
   exit 1
 fi
@@ -20,7 +40,35 @@ if ! command -v gsettings >/dev/null 2>&1; then
   exit 1
 fi
 
-# Read current custom shortcut names.
+# Map KEY_COMBO like "Super+Ctrl" to gsettings token "<Super><Ctrl>".
+combo_tokens() {
+  local raw="$1"
+  local out=""
+  local part
+  IFS='+' read -ra parts <<< "${raw}"
+  for part in "${parts[@]}"; do
+    part="$(echo "${part}" | sed 's/^ *//;s/ *$//')"
+    [[ -z "${part}" ]] && continue
+    case "${part}" in
+      Super|super|Mod4) out+="<Super>" ;;
+      Ctrl|ctrl|Control) out+="<Ctrl>" ;;
+      Alt|alt) out+="<Alt>" ;;
+      Shift|shift) out+="<Shift>" ;;
+      *)
+        echo "error: unsupported key combo part: ${part}" >&2
+        exit 1
+        ;;
+    esac
+  done
+  printf '%s' "${out}"
+}
+
+COMBO_PREFIX="$(combo_tokens "${KEY_COMBO}")"
+if [[ -z "${COMBO_PREFIX}" ]]; then
+  echo "error: PROMPT_VAULT_KEY_COMBO is empty or invalid." >&2
+  exit 1
+fi
+
 mapfile -t EXISTING < <(gsettings get "${KEYBIND_SCHEMA}" "${CUSTOM_LIST_KEY}" | tr -d "[]'" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -v '^$' || true)
 
 add_to_list() {
@@ -37,25 +85,27 @@ add_to_list() {
   fi
 }
 
+hotkey_q="$(printf '%q' "${HOTKEY_CMD}")"
+
 for slot in $(seq 1 9); do
   id="prompt-vault-slot${slot}"
   schema="${KEYBIND_SCHEMA}.custom-keybinding:/org/cinnamon/desktop/keybindings/custom-keybindings/${id}/"
+  binding="['${COMBO_PREFIX}${slot}']"
 
   add_to_list "${id}"
 
   if [[ -n "${DATA_DIR}" ]]; then
     data_q="$(printf '%q' "${DATA_DIR}")"
-    cmd="${COPY_CMD} --data-dir ${data_q} --slot ${slot} --quiet"
+    cmd="env PROMPT_VAULT_DATA_DIR=${data_q} ${hotkey_q} ${slot}"
   else
-    cmd="${COPY_CMD} --slot ${slot} --quiet"
+    cmd="${hotkey_q} ${slot}"
   fi
 
   gsettings set "${schema}" name "Prompt Vault: Slot ${slot}"
   gsettings set "${schema}" command "${cmd}"
-  gsettings set "${schema}" binding "['<Super><Shift>${slot}']"
+  gsettings set "${schema}" binding "${binding}"
 done
 
-# Write merged custom-list (preserve unrelated shortcuts).
 if [[ "${#EXISTING[@]}" -eq 0 ]]; then
   gsettings set "${KEYBIND_SCHEMA}" "${CUSTOM_LIST_KEY}" "['prompt-vault-slot1', 'prompt-vault-slot2', 'prompt-vault-slot3', 'prompt-vault-slot4', 'prompt-vault-slot5', 'prompt-vault-slot6', 'prompt-vault-slot7', 'prompt-vault-slot8', 'prompt-vault-slot9']"
 else
@@ -70,8 +120,18 @@ else
   gsettings set "${KEYBIND_SCHEMA}" "${CUSTOM_LIST_KEY}" "[${joined}]"
 fi
 
+# Cinnamon reloads custom shortcut commands only when custom-list changes.
+saved_list="$(gsettings get "${KEYBIND_SCHEMA}" "${CUSTOM_LIST_KEY}")"
+gsettings set "${KEYBIND_SCHEMA}" "${CUSTOM_LIST_KEY}" "['__dummy__']"
+gsettings set "${KEYBIND_SCHEMA}" "${CUSTOM_LIST_KEY}" "${saved_list}"
+
 echo "Prompt Vault keyboard shortcuts installed:"
-echo "  Super+Shift+1 … Super+Shift+9  →  copy slot 1 … 9 to clipboard"
+echo "  ${KEY_COMBO}+1 … ${KEY_COMBO}+9  →  paste slot 1 … 9 into the focused field"
 echo
-echo "Change key combos: Settings → Keyboard → Custom Shortcuts"
-echo "Assign prompts to slots: Prompt Vault → Edit prompt → Keyboard slot"
+echo "Focus a text field first, then press the shortcut."
+echo "Change combos: Settings → Keyboard → Custom Shortcuts (Prompt Vault: Slot N)"
+echo "Assign prompts: Prompt Vault → Edit prompt → Shortcut slot"
+echo
+if ! command -v xdotool >/dev/null 2>&1 && [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
+  echo "Note: install xdotool for auto-paste on X11: sudo apt install xdotool"
+fi

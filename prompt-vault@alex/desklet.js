@@ -48,6 +48,8 @@ const CinnamonEntry = imports.ui.cinnamonEntry;
 const UUID = "prompt-vault@alex";
 const DATA_VERSION = 1;
 const DEFAULT_DATA_SUBDIR = ["prompt-vault@alex"];
+// Must match prompt-vault-setup-shortcuts default (Super+Ctrl avoids Super+1–9 app-switch conflicts).
+const HOTKEY_COMBO_LABEL = _("Super") + "+Ctrl+";
 
 // Hard limits to keep the UI and data files sane and resistant to malformed
 // or hostile import files.
@@ -284,7 +286,8 @@ class PromptEditDialog {
     });
     new Tooltips.Tooltip(
       slotTitle,
-      _("Super+Shift+1–9 copies this prompt after installing shortcuts from the desklet toolbar. Copies raw text (no {{placeholder}} fill).")
+      HOTKEY_COMBO_LABEL +
+        "1–9 pastes this prompt into the focused field after installing shortcuts from the desklet toolbar. Also copies to clipboard. Raw text (no {{placeholder}} fill)."
     );
     layout.add(slotTitle, { x_fill: true });
 
@@ -300,7 +303,7 @@ class PromptEditDialog {
       const tip =
         value === 0
           ? _("No global shortcut for this prompt")
-          : _("Slot") + " " + value + " — " + _("Super") + "+Shift+" + value;
+          : _("Slot") + " " + value + " — " + HOTKEY_COMBO_LABEL + value;
       new Tooltips.Tooltip(chip, tip);
       chip.connect("clicked", () => {
         this._selectedSlot = value;
@@ -1768,7 +1771,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
       });
       new Tooltips.Tooltip(
         slotBadge,
-        _("Keyboard slot") + " " + prompt.hotkeySlot + " (" + _("Super") + "+Shift+" + prompt.hotkeySlot + ")"
+        _("Paste via") + " " + HOTKEY_COMBO_LABEL + prompt.hotkeySlot
       );
       titleRow.add(slotBadge, { expand: false, y_align: St.Align.MIDDLE, y_fill: false });
     }
@@ -2062,7 +2065,8 @@ class PromptVaultDesklet extends Desklet.Desklet {
   _setupKeyboardShortcuts() {
     const setupPath = this._resolveBinScript("prompt-vault-setup-shortcuts");
     const copyPath = this._resolveBinScript("prompt-vault-copy");
-    if (!setupPath || !copyPath) {
+    const hotkeyPath = this._resolveBinScript("prompt-vault-hotkey");
+    if (!setupPath || !copyPath || !hotkeyPath) {
       this._setStatus(_("Shortcut tools missing — run ./install.sh from the repo."), true);
       Main.notify(
         _("Prompt Vault"),
@@ -2071,7 +2075,10 @@ class PromptVaultDesklet extends Desklet.Desklet {
       return;
     }
 
-    const envPatch = { PROMPT_VAULT_COPY_CMD: copyPath };
+    const envPatch = {
+      PROMPT_VAULT_COPY_CMD: copyPath,
+      PROMPT_VAULT_HOTKEY_CMD: hotkeyPath,
+    };
     const dataDir = this._getDataDir();
     if (dataDir !== this._getDefaultDataDir()) {
       envPatch.PROMPT_VAULT_DATA_DIR = dataDir;
@@ -2087,12 +2094,13 @@ class PromptVaultDesklet extends Desklet.Desklet {
         null
       );
       const assigned = this._prompts.filter((p) => p.hotkeySlot).length;
+      const combo = HOTKEY_COMBO_LABEL + "1–9";
       const hint =
         assigned > 0
-          ? _("Super+Shift+1–9 copies assigned slots.")
+          ? combo + _(" pastes assigned slots — focus a text field first.")
           : _("Shortcuts registered. Edit a prompt and pick slot 1–9.");
       this._setStatus(_("Keyboard shortcuts installed.") + " " + hint);
-      Main.notify(_("Prompt Vault"), _("Global shortcuts installed: Super+Shift+1–9"));
+      Main.notify(_("Prompt Vault"), _("Global shortcuts installed:") + " " + combo);
     } catch (e) {
       global.logError(`[Prompt Vault] Shortcut setup failed: ${e}`);
       this._setStatus(_("Could not install keyboard shortcuts."), true);

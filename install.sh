@@ -20,7 +20,7 @@ Usage: ./install.sh [--shortcuts]
 
   Installs the desklet (symlink) and CLI tools into ~/.local/bin.
 
-  --shortcuts   Also register Super+Shift+1–9 Cinnamon custom shortcuts.
+  --shortcuts   Also register Super+Ctrl+1–9 Cinnamon custom shortcuts.
 EOF
 }
 
@@ -46,7 +46,7 @@ if [[ -L "${DEST}" || -e "${DEST}" ]]; then
 fi
 ln -s "${SRC}" "${DEST}"
 
-for script in prompt-vault-copy prompt-vault-setup-shortcuts; do
+for script in prompt-vault-copy prompt-vault-hotkey prompt-vault-setup-shortcuts; do
   src="${REPO_ROOT}/bin/${script}"
   if [[ ! -f "${src}" ]]; then
     echo "error: missing ${src}" >&2
@@ -59,13 +59,15 @@ done
 echo "Installed Prompt Vault:"
 echo "  Desklet: ${DEST} -> ${SRC}"
 echo "  CLI:     ${BIN_DIR}/prompt-vault-copy"
+echo "           ${BIN_DIR}/prompt-vault-hotkey"
 echo "           ${BIN_DIR}/prompt-vault-setup-shortcuts"
 echo
 echo "Next:"
 echo "  1. Right-click the desktop → 'Add Desklets' → Prompt Vault → Add."
-echo "  2. Edit prompts → pick keyboard slot 1–9 → click Shortcuts (toolbar)."
-echo "  3. Press Super+Shift+1–9 anywhere to copy that slot to the clipboard."
-echo "  4. If the desklet does not appear, reload Cinnamon (Ctrl+Alt+Esc) or log out/in."
+echo "  2. Edit prompts → pick shortcut slot 1–9 → click Shortcuts (toolbar)."
+echo "  3. Focus a text field → press Super+Ctrl+1–9 to paste that slot."
+echo "  4. X11 auto-paste needs xdotool: sudo apt install xdotool"
+echo "  5. If the desklet does not appear, reload Cinnamon (Ctrl+Alt+Esc) or log out/in."
 
 if [[ "${INSTALL_SHORTCUTS}" -eq 1 ]]; then
   echo

@@ -18,8 +18,8 @@ you reuse, find them instantly, and copy them to the clipboard with one click.
 - **Usage stats** — prompts remember how often and how recently they were copied,
   and can be sorted by "most copied" or "recently used".
 - **Global keyboard shortcuts** — assign each prompt to slot 1–9, install shortcuts once,
-  then press **Super+Shift+1** … **Super+Shift+9** from anywhere to copy that prompt
-  (raw text; `{{placeholder}}` fill is skipped on hotkey copy).
+  then press **Super+Ctrl+1** … **Super+Ctrl+9** to **paste** that prompt
+  into whatever field is focused (also copied to the clipboard; raw text, no `{{placeholder}}` fill).
 - **Favorites, duplicate, edit, delete** — edit opens a proper dialog; template fill stays inline, with optional delete
   confirmation.
 - **Backup & restore** — export a timestamped JSON file; import by merge or full
@@ -59,11 +59,15 @@ mechanism as system confirmations) with its own focus and scroll handling.
 1. Run `./install.sh` (installs CLI helpers into `~/.local/bin`).
 2. In Prompt Vault, **Edit** a prompt → **Keyboard shortcut** → pick slot **1–9**.
 3. Click **Shortcuts** in the toolbar (or right-click → **Install keyboard shortcuts**).
-4. Press **Super+Shift+1** … **Super+Shift+9** anywhere to copy that slot.
+4. **Click into a text field**, then press **Super+Ctrl+1** … **Super+Ctrl+9** to paste that slot.
 
 | Shortcut | Action |
 | --- | --- |
-| `Super+Shift+1` … `Super+Shift+9` | Copy prompt assigned to that slot |
+| `Super+Ctrl+1` … `Super+Ctrl+9` | Paste prompt assigned to that slot |
+
+Uses **Super+Ctrl** (not Super+Shift) to avoid conflicts with Cinnamon/Mint shortcuts
+such as Super+1–9 app switching. Requires **xdotool** on X11 (`sudo apt install xdotool`)
+or **wtype** / **ydotool** on Wayland. Re-run **Shortcuts** after every `./install.sh` update.
 
 Change bindings in **Settings → Keyboard → Custom Shortcuts** (entries named
 *Prompt Vault: Slot N*). Re-run **Shortcuts** after changing the data folder in
@@ -73,7 +77,7 @@ CLI (optional):
 
 ```bash
 prompt-vault-copy --list          # show slot assignments
-prompt-vault-copy --slot 3        # copy slot 3 manually
+prompt-vault-copy --slot 3 --paste   # copy + auto-paste slot 3
 ./install.sh --shortcuts          # install desklet + register shortcuts
 ```
 

@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -93,8 +94,35 @@ def _find_by_slot(prompts: list[dict[str, Any]], slot: int) -> dict[str, Any] | 
     return None
 
 
-def _copy_to_clipboard(text: str) -> None:
+def _session_env() -> dict[str, str]:
+    """Best-effort session vars when launched from a Cinnamon custom shortcut."""
     env = os.environ.copy()
+    if "DBUS_SESSION_BUS_ADDRESS" not in env:
+        env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{os.getuid()}/bus"
+    if "DISPLAY" not in env and "WAYLAND_DISPLAY" not in env:
+        env["DISPLAY"] = ":0"
+    return env
+
+
+def _copy_via_gtk(text: str, env: dict[str, str]) -> None:
+    os.environ.update(env)
+    import gi
+
+    gi.require_version("Gdk", "3.0")
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gdk, Gtk
+
+    if not Gtk.init_check([]):
+        raise RuntimeError("Gtk could not connect to the display for clipboard access.")
+    clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+    clipboard.set_text(text, -1)
+    clipboard.store()
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+
+
+def _copy_to_clipboard(text: str) -> None:
+    env = _session_env()
     if env.get("WAYLAND_DISPLAY") and shutil_which("wl-copy"):
         subprocess.run(["wl-copy", "--", text], check=True, env=env)
         return
@@ -114,9 +142,55 @@ def _copy_to_clipboard(text: str) -> None:
             env=env,
         )
         return
-    raise RuntimeError(
-        "No clipboard tool found. Install wl-clipboard (Wayland) or xclip (X11)."
+    try:
+        _copy_via_gtk(text, env)
+        return
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not copy to the clipboard. Install xclip (X11) or wl-clipboard (Wayland), "
+            f"or ensure python3-gi and a desktop session are available ({exc})."
+        ) from exc
+
+
+def _release_hotkey_modifiers(env: dict[str, str]) -> None:
+    """Release keys held by the shortcut chord so simulated Ctrl+V is not swallowed."""
+    if env.get("WAYLAND_DISPLAY"):
+        return
+    if not shutil_which("xdotool"):
+        return
+    subprocess.run(
+        ["xdotool", "keyup", "super", "ctrl", "shift", "alt", "Meta_L", "Meta_R"],
+        check=False,
+        env=env,
     )
+
+
+def _paste_clipboard(env: dict[str, str]) -> None:
+    """Simulate Ctrl+V into the currently focused window."""
+    _release_hotkey_modifiers(env)
+    time.sleep(0.06)
+
+    if env.get("WAYLAND_DISPLAY"):
+        if shutil_which("wtype"):
+            subprocess.run(
+                ["wtype", "-M", "ctrl", "-m", "ctrl", "-k", "v"],
+                check=True,
+                env=env,
+            )
+            return
+        if shutil_which("ydotool"):
+            subprocess.run(["ydotool", "key", "ctrl+v"], check=True, env=env)
+            return
+        raise RuntimeError("Install wtype or ydotool for auto-paste on Wayland.")
+
+    if shutil_which("xdotool"):
+        subprocess.run(
+            ["xdotool", "key", "--clearmodifiers", "ctrl+v"],
+            check=True,
+            env=env,
+        )
+        return
+    raise RuntimeError("Install xdotool for auto-paste on X11 (sudo apt install xdotool).")
 
 
 def shutil_which(cmd: str) -> str | None:
@@ -134,6 +208,7 @@ def _notify(title: str, body: str) -> None:
         subprocess.run(
             ["notify-send", "-a", "Prompt Vault", "-i", "edit-copy-symbolic", title, body],
             check=False,
+            env=_session_env(),
         )
     except Exception:
         pass
@@ -156,7 +231,7 @@ def cmd_list_slots(path: Path) -> int:
     return 0
 
 
-def cmd_copy_slot(path: Path, slot: int, quiet: bool) -> int:
+def cmd_copy_slot(path: Path, slot: int, quiet: bool, paste: bool) -> int:
     if slot < MIN_SLOT or slot > MAX_SLOT:
         print(f"Slot must be between {MIN_SLOT} and {MAX_SLOT}.", file=sys.stderr)
         return 2
@@ -189,6 +264,21 @@ def cmd_copy_slot(path: Path, slot: int, quiet: bool) -> int:
         print(f"Clipboard error: {exc}", file=sys.stderr)
         return 5
 
+    pasted = False
+    if paste:
+        time.sleep(0.08)
+        try:
+            _paste_clipboard(_session_env())
+            pasted = True
+        except Exception as exc:
+            title = str(prompt.get("title", "Untitled")).strip() or "Untitled"
+            _notify(
+                "Prompt Vault",
+                f"Copied “{title}” but could not auto-paste. Press Ctrl+V. ({exc})",
+            )
+            if not quiet:
+                print(f"Paste error: {exc}", file=sys.stderr)
+
     # Update usage stats (exclusive lock via rewrite).
     now = _iso_now()
     for p in prompts:
@@ -203,9 +293,12 @@ def cmd_copy_slot(path: Path, slot: int, quiet: bool) -> int:
         _save_json_locked(path, {"version": 1, "exportedAt": now, "prompts": prompts})
 
     title = str(prompt.get("title", "Untitled")).strip() or "Untitled"
-    _notify("Prompt Vault", f"Copied “{title}” (slot {slot})")
+    if not paste or pasted:
+        action = "Pasted" if pasted else "Copied"
+        _notify("Prompt Vault", f"{action} “{title}” (slot {slot})")
     if not quiet:
-        print(f"Copied slot {slot}: {title}")
+        verb = "Pasted" if pasted else "Copied"
+        print(f"{verb} slot {slot}: {title}")
     return 0
 
 
@@ -238,6 +331,12 @@ def main() -> int:
         action="store_true",
         help="Suppress stdout messages (notifications still shown)",
     )
+    parser.add_argument(
+        "--paste",
+        "-p",
+        action="store_true",
+        help="After copying, simulate Ctrl+V into the focused window",
+    )
     args = parser.parse_args()
 
     if args.data_dir is not None:
@@ -252,7 +351,7 @@ def main() -> int:
         parser.print_help(sys.stderr)
         return 2
 
-    return cmd_copy_slot(path, args.slot, args.quiet)
+    return cmd_copy_slot(path, args.slot, args.quiet, args.paste)
 
 
 if __name__ == "__main__":

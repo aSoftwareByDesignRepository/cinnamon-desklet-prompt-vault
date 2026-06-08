@@ -1,8 +1,8 @@
 {
   "uuid": "prompt-vault@alex",
   "name": "Prompt Vault",
-  "description": "Store, search and copy reusable prompts. Categories, tags, favorites, global Super+Shift+1–9 shortcuts, usage stats, {{placeholder}} fill-in, and JSON backup/restore.",
-  "version": "1.8.0",
+  "description": "Store, search and copy reusable prompts. Categories, tags, favorites, global Super+Ctrl+1–9 paste shortcuts, usage stats, {{placeholder}} fill-in, and JSON backup/restore.",
+  "version": "1.8.1",
   "author": "Alexander Mäule",
   "max-instances": 1
 }
