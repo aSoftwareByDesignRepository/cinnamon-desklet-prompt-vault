@@ -172,6 +172,15 @@
   max-width: 130px;
 }
 
+.prompt-vault-hotkey-badge {
+  font-size: 0.74em;
+  color: #ffffff;
+  padding: 1px 8px;
+  border-radius: 9px;
+  background-color: rgba(76, 141, 255, 0.55);
+  font-weight: bold;
+}
+
 .prompt-vault-row-preview {
   font-size: 0.85em;
   color: #cdd1da;
@@ -231,8 +240,16 @@
   padding-top: 4px;
 }
 
+.prompt-vault-toolbar-row {
+  spacing: 6px;
+}
+
+.prompt-vault-toolbar-compact .prompt-vault-toolbar-row {
+  spacing: 4px;
+}
+
 .prompt-vault-toolbar-btn {
-  padding: 8px 6px;
+  padding: 8px 10px;
   border-radius: 10px;
   background-color: rgba(255, 255, 255, 0.09);
   border: 2px solid rgba(255, 255, 255, 0.12);
@@ -240,8 +257,17 @@
   font-size: 0.9em;
 }
 
+.prompt-vault-toolbar-compact .prompt-vault-toolbar-btn {
+  padding: 10px 12px;
+}
+
 .prompt-vault-toolbar-btn-inner {
-  spacing: 6px;
+  spacing: 8px;
+}
+
+.prompt-vault-toolbar-label {
+  font-size: 0.92em;
+  color: #eef0f4;
 }
 
 .prompt-vault-toolbar-btn:hover {
@@ -265,6 +291,60 @@
 }
 
 .prompt-vault-btn-primary:focus {
+  border: 2px solid #ffffff;
+}
+
+.prompt-vault-btn-shortcuts {
+  background-color: rgba(127, 176, 255, 0.22);
+  border: 2px solid rgba(127, 176, 255, 0.45);
+}
+
+.prompt-vault-btn-shortcuts:hover {
+  background-color: rgba(127, 176, 255, 0.34);
+}
+
+.prompt-vault-btn-shortcuts:focus {
+  border: 2px solid #7fb0ff;
+}
+
+/* ---- Keyboard slot selector (edit dialog) ------------------------------- */
+.prompt-vault-slot-row {
+  spacing: 6px;
+  padding: 4px 0 8px 0;
+}
+
+.prompt-vault-slot-chip {
+  min-width: 2.4em;
+  padding: 6px 10px;
+  border-radius: 10px;
+  font-size: 0.9em;
+  font-weight: bold;
+  color: #eef0f4;
+  background-color: rgba(255, 255, 255, 0.08);
+  border: 2px solid rgba(255, 255, 255, 0.18);
+}
+
+.prompt-vault-slot-chip:hover {
+  background-color: rgba(255, 255, 255, 0.16);
+}
+
+.prompt-vault-slot-chip:focus {
+  border: 2px solid #7fb0ff;
+  background-color: rgba(127, 176, 255, 0.16);
+}
+
+.prompt-vault-slot-chip-active {
+  background-color: #4c8dff;
+  border: 2px solid #4c8dff;
+  color: #ffffff;
+}
+
+.prompt-vault-slot-chip-active:hover {
+  background-color: #6ba4ff;
+  border: 2px solid #6ba4ff;
+}
+
+.prompt-vault-slot-chip-active:focus {
   border: 2px solid #ffffff;
 }
 
@@ -445,6 +525,26 @@
   padding-bottom: 8px;
 }
 
+.prompt-vault-dialog-slot-title {
+  padding-top: 4px;
+  padding-bottom: 2px;
+}
+
+.prompt-vault-dialog-slot-grid {
+  spacing: 10px;
+  padding-bottom: 4px;
+}
+
+.prompt-vault-dialog-slot-row {
+  spacing: 6px;
+}
+
+.prompt-vault-dialog-slot-chip {
+  min-width: 0;
+  padding: 5px 8px;
+  font-size: 0.85em;
+}
+
 .prompt-vault-dialog-scroll {
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.15);
@@ -459,5 +559,5 @@
 }
 
 .prompt-vault-edit-dialog .prompt-vault-textarea {
-  min-height: 280px;
+  min-height: 0;
 }

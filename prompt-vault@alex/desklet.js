@@ -101,6 +101,12 @@ function _asCount(v) {
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
 }
 
+function _normalizeHotkeySlot(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 1 || n > 9) return 0;
+  return Math.floor(n);
+}
+
 function _isPlainObject(v) {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
@@ -163,6 +169,7 @@ function _sanitizePrompt(raw) {
     tags: _normalizeTags(p.tags),
     notes: _clampStr(_asStr(p.notes), LIMITS.notes),
     favorite: !!p.favorite,
+    hotkeySlot: _normalizeHotkeySlot(p.hotkeySlot),
     createdAt: _asIso(p.createdAt) || now,
     updatedAt: _asIso(p.updatedAt) || _asIso(p.createdAt) || now,
     lastUsedAt: _asIso(p.lastUsedAt),
@@ -173,7 +180,16 @@ function _sanitizePrompt(raw) {
 function _samplePrompts() {
   const now = _nowIso();
   const mk = (o) => Object.assign(
-    { tags: [], notes: "", favorite: false, createdAt: now, updatedAt: now, lastUsedAt: null, useCount: 0 },
+    {
+      tags: [],
+      notes: "",
+      favorite: false,
+      hotkeySlot: 0,
+      createdAt: now,
+      updatedAt: now,
+      lastUsedAt: null,
+      useCount: 0,
+    },
     o,
     { id: GLib.uuid_string_random() }
   );
@@ -186,6 +202,7 @@ function _samplePrompts() {
         "List concrete issues by severity, then propose the smallest safe fix for each.",
       tags: ["cinnamon", "gjs", "review"],
       favorite: true,
+      hotkeySlot: 1,
     }),
     mk({
       title: "Explain like I'm busy",
@@ -260,6 +277,48 @@ class PromptEditDialog {
     this._categoryEntry = mkField(_("Category"), _("e.g. Writing, Dev workflow"));
     this._tagsEntry = mkField(_("Tags"), _("Comma-separated"));
     this._notesEntry = mkField(_("Notes"), _("Optional — not copied"));
+
+    const slotTitle = new St.Label({
+      text: _("Shortcut slot"),
+      style_class: "prompt-vault-section-title prompt-vault-dialog-slot-title",
+    });
+    new Tooltips.Tooltip(
+      slotTitle,
+      _("Super+Shift+1–9 copies this prompt after installing shortcuts from the desklet toolbar. Copies raw text (no {{placeholder}} fill).")
+    );
+    layout.add(slotTitle, { x_fill: true });
+
+    this._selectedSlot = 0;
+    this._slotChips = [];
+    const mkSlotChip = (parent, label, value) => {
+      const chip = new St.Button({
+        label,
+        can_focus: true,
+        style_class: "prompt-vault-slot-chip prompt-vault-dialog-slot-chip",
+      });
+      chip._pvSlotValue = value;
+      const tip =
+        value === 0
+          ? _("No global shortcut for this prompt")
+          : _("Slot") + " " + value + " — " + _("Super") + "+Shift+" + value;
+      new Tooltips.Tooltip(chip, tip);
+      chip.connect("clicked", () => {
+        this._selectedSlot = value;
+        this._updateSlotChips();
+      });
+      parent.add(chip, { expand: true, x_fill: true });
+      this._slotChips.push(chip);
+      return chip;
+    };
+    const slotGrid = new St.BoxLayout({ vertical: true, style_class: "prompt-vault-dialog-slot-grid" });
+    const slotRowA = new St.BoxLayout({ vertical: false, style_class: "prompt-vault-dialog-slot-row" });
+    const slotRowB = new St.BoxLayout({ vertical: false, style_class: "prompt-vault-dialog-slot-row" });
+    mkSlotChip(slotRowA, _("None"), 0);
+    for (let s = 1; s <= 5; s++) mkSlotChip(slotRowA, String(s), s);
+    for (let s = 6; s <= 9; s++) mkSlotChip(slotRowB, String(s), s);
+    slotGrid.add(slotRowA, { x_fill: true });
+    slotGrid.add(slotRowB, { x_fill: true });
+    layout.add(slotGrid, { x_fill: true });
 
     const labelRow = new St.BoxLayout({ vertical: false });
     labelRow.add(
@@ -349,24 +408,49 @@ class PromptEditDialog {
     ]);
 
     this._dialog.connect("opened", () => {
-      this._syncContentLayout();
+      this._scheduleContentLayoutSync();
+      this._updateSlotChips();
       const focusEntry = this._existing ? this._contentEntry : this._titleEntry;
       this._dialog.setInitialKeyFocus(focusEntry);
       focusEntry.clutter_text.grab_key_focus();
     });
   }
 
+  _scheduleContentLayoutSync() {
+    const run = () => {
+      if (!this._contentEntry) return GLib.SOURCE_REMOVE;
+      this._syncContentLayout();
+      return GLib.SOURCE_REMOVE;
+    };
+    this._syncContentLayout();
+    Mainloop.timeout_add(0, run);
+    Mainloop.timeout_add(80, run);
+  }
+
+  _updateSlotChips() {
+    for (const chip of this._slotChips || []) {
+      const active = chip._pvSlotValue === this._selectedSlot;
+      if (active) chip.add_style_class_name("prompt-vault-slot-chip-active");
+      else chip.remove_style_class_name("prompt-vault-slot-chip-active");
+    }
+  }
+
   _syncContentLayout() {
+    if (!this._scrollInner || !this._contentEntry) return;
     const innerW = this._innerW;
+    // Subtract scroll + entry padding so line-wrap height matches what is actually rendered.
+    const textW = Math.max(180, innerW - 34);
+    const bottomPad = 40;
     this._scrollInner.style = `width: ${innerW}px; min-width: ${innerW}px;`;
     const ct = this._contentEntry.clutter_text;
     try {
-      ct.set_size(innerW * Pango.SCALE, -1);
-      const [, prefH] = ct.get_preferred_height(innerW);
-      const boxH = Math.max(this._scrollH - 8, prefH + 4);
+      ct.set_size(textW * Pango.SCALE, -1);
+      const [, prefH] = ct.get_preferred_height(textW);
+      const boxH = Math.max(this._scrollH - 8, prefH + bottomPad);
+      this._scrollInner.style = `width: ${innerW}px; min-width: ${innerW}px; min-height: ${boxH}px;`;
       this._contentEntry.set_height(boxH);
       ct.set_min_height(boxH);
-      ct.set_size(innerW * Pango.SCALE, boxH * Pango.SCALE);
+      ct.set_size(textW * Pango.SCALE, boxH * Pango.SCALE);
       this._scrollInner.queue_relayout();
       this._scroll.queue_relayout();
     } catch (e) {
@@ -405,6 +489,7 @@ class PromptEditDialog {
         content: _clampStr(content, LIMITS.content),
         tags: _normalizeTags(this._tagsEntry.get_text()),
         notes: _clampStr(this._notesEntry.get_text().trim(), LIMITS.notes),
+        hotkeySlot: this._selectedSlot,
       })
     ) {
       this.close();
@@ -413,6 +498,7 @@ class PromptEditDialog {
 
   open() {
     const ex = this._existing;
+    this._selectedSlot = ex ? _normalizeHotkeySlot(ex.hotkeySlot) : 0;
     this._titleEntry.set_text(ex ? ex.title : "");
     this._categoryEntry.set_text(ex ? ex.category : "General");
     this._tagsEntry.set_text(ex ? _tagsToString(ex.tags) : "");
@@ -421,6 +507,7 @@ class PromptEditDialog {
     this._charCount.set_text(`${this._contentEntry.get_text().length} ${_("chars")}`);
     this._setError("");
     this._dialog.open();
+    this._scheduleContentLayoutSync();
   }
 
   close() {
@@ -567,6 +654,50 @@ class PromptVaultDesklet extends Desklet.Desklet {
     return GLib.build_filenamev([this._getDataDir(), `prompts-backup-${stamp}.json`]);
   }
 
+  _getDefaultDataDir() {
+    return GLib.build_filenamev([GLib.get_home_dir(), ".local", "share", ...DEFAULT_DATA_SUBDIR]);
+  }
+
+  _resolveBinScript(name) {
+    const local = GLib.build_filenamev([GLib.get_home_dir(), ".local", "bin", name]);
+    if (GLib.file_test(local, GLib.FileTest.IS_EXECUTABLE)) return local;
+    try {
+      const dev = GLib.build_filenamev([this.metadata.path, "..", "..", "bin", name]);
+      const resolved = GLib.canonicalize_filename(dev, null);
+      if (GLib.file_test(resolved, GLib.FileTest.IS_EXECUTABLE)) return resolved;
+    } catch (e) {
+      /* ignore */
+    }
+    return null;
+  }
+
+  _spawnEnvPatch(patch) {
+    const env = GLib.get_environ();
+    const out = env.slice();
+    for (const [key, value] of Object.entries(patch)) {
+      const entry = `${key}=${value}`;
+      const idx = out.findIndex((pair) => pair.startsWith(`${key}=`));
+      if (idx >= 0) out[idx] = entry;
+      else out.push(entry);
+    }
+    return out;
+  }
+
+  _dedupeHotkeySlots() {
+    const seen = new Set();
+    for (const p of this._prompts) {
+      const slot = _normalizeHotkeySlot(p.hotkeySlot);
+      p.hotkeySlot = slot;
+      if (!slot) continue;
+      if (seen.has(slot)) {
+        p.hotkeySlot = 0;
+        p.updatedAt = _nowIso();
+      } else {
+        seen.add(slot);
+      }
+    }
+  }
+
   _setMode(file, mode) {
     // Best-effort hardening; never fatal if the filesystem can't store modes.
     try {
@@ -641,6 +772,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
         : null;
       if (!list) throw new Error("unexpected data format");
       this._prompts = list.map(_sanitizePrompt);
+      this._dedupeHotkeySlots();
     } catch (e) {
       this._quarantineFile(path, e);
       this._prompts = _samplePrompts();
@@ -758,12 +890,27 @@ class PromptVaultDesklet extends Desklet.Desklet {
     this._scrollView.add_actor(this._listBox);
     this._listPanel.add(this._scrollView, { expand: true, x_fill: true, y_fill: true });
 
-    const toolbar = new St.BoxLayout({ vertical: false, style_class: "prompt-vault-toolbar" });
-    this._mkTextBtn(toolbar, "list-add-symbolic", _("Add prompt"), () => this._openEditor(null), "prompt-vault-btn-primary");
-    this._mkTextBtn(toolbar, "document-save-symbolic", _("Export"), () => this._exportBackup());
-    this._mkTextBtn(toolbar, "document-open-symbolic", _("Import"), () => this._importBackup(false));
-    this._mkTextBtn(toolbar, "folder-symbolic", _("Folder"), () => this._openDataFolder());
-    this._listPanel.add(toolbar, { x_fill: true });
+    this._toolbar = new St.BoxLayout({ vertical: true, style_class: "prompt-vault-toolbar" });
+    this._toolbarBtns = [
+      this._mkTextBtn(
+        null,
+        "list-add-symbolic",
+        _("Add prompt"),
+        () => this._openEditor(null),
+        "prompt-vault-btn-primary"
+      ),
+      this._mkTextBtn(
+        null,
+        "input-keyboard-symbolic",
+        _("Shortcuts"),
+        () => this._setupKeyboardShortcuts(),
+        "prompt-vault-btn-shortcuts"
+      ),
+      this._mkTextBtn(null, "document-save-symbolic", _("Export"), () => this._exportBackup()),
+      this._mkTextBtn(null, "document-open-symbolic", _("Import"), () => this._importBackup(false)),
+      this._mkTextBtn(null, "folder-symbolic", _("Data folder"), () => this._openDataFolder()),
+    ];
+    this._listPanel.add(this._toolbar, { x_fill: true });
 
     this._root.add(this._listPanel, { expand: true, x_fill: true, y_fill: true });
 
@@ -990,6 +1137,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
     if (this._scrollView) this._scrollView.style = `height: ${h}px;`;
     if (this._templateScroll) this._templateScroll.style = `height: ${formH}px; min-height: ${formH}px;`;
     this._layoutScrollContent(this._templateScroll, this._templateFieldsBox, w);
+    this._layoutToolbar();
   }
 
   // Tracked timeout so nothing fires after the desklet is removed.
@@ -1347,16 +1495,60 @@ class PromptVaultDesklet extends Desklet.Desklet {
       new St.Icon({ icon_name: iconName, icon_type: St.IconType.SYMBOLIC, icon_size: 15 }),
       { y_align: St.Align.MIDDLE, y_fill: false }
     );
-    box.add(new St.Label({ text: label }), { y_align: St.Align.MIDDLE, y_fill: false });
+    const text = new St.Label({ text: label, style_class: "prompt-vault-toolbar-label" });
+    try {
+      text.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+    } catch (e) {
+      /* ignore */
+    }
+    box.add(text, { y_align: St.Align.MIDDLE, y_fill: false, expand: true });
     const btn = new St.Button({
       style_class: "prompt-vault-toolbar-btn" + (extraClass ? " " + extraClass : ""),
       can_focus: true,
       child: box,
+      x_expand: true,
     });
     this._a11y(btn, label);
+    new Tooltips.Tooltip(btn, label);
     btn.connect("clicked", () => onClick());
-    parent.add(btn, { expand: true, x_fill: true });
+    if (parent) parent.add(btn, { expand: true, x_fill: true });
     return btn;
+  }
+
+  _clearToolbarRows() {
+    if (!this._toolbar) return;
+    while (this._toolbar.get_n_children() > 0) {
+      this._toolbar.remove_actor(this._toolbar.get_child_at_index(0));
+    }
+  }
+
+  _addToolbarRow(buttons, fullWidth) {
+    const row = new St.BoxLayout({ vertical: false, style_class: "prompt-vault-toolbar-row" });
+    for (const btn of buttons) {
+      row.add(btn, { expand: true, x_fill: true });
+    }
+    this._toolbar.add(row, { x_fill: fullWidth, expand: false });
+  }
+
+  // Reflow toolbar so icon + text labels stay readable at every desklet width.
+  _layoutToolbar() {
+    if (!this._toolbar || !this._toolbarBtns || !this._toolbarBtns.length) return;
+
+    const w = this._getPanelWidth();
+    const btns = this._toolbarBtns;
+    this._clearToolbarRows();
+    this._toolbar.remove_style_class_name("prompt-vault-toolbar-compact");
+
+    if (w >= 520) {
+      this._addToolbarRow(btns, true);
+    } else if (w >= 300) {
+      this._addToolbarRow(btns.slice(0, 2), true);
+      this._addToolbarRow(btns.slice(2), true);
+    } else {
+      this._toolbar.add_style_class_name("prompt-vault-toolbar-compact");
+      for (const btn of btns) this._addToolbarRow([btn], true);
+    }
+    this._toolbar.queue_relayout();
   }
 
   // -- Status / feedback ----------------------------------------------------
@@ -1569,6 +1761,17 @@ class PromptVaultDesklet extends Desklet.Desklet {
     const badge = new St.Label({ text: prompt.category, style_class: "prompt-vault-category" });
     badge.clutter_text.ellipsize = Pango.EllipsizeMode.END;
     titleRow.add(badge, { expand: false, y_align: St.Align.MIDDLE, y_fill: false });
+    if (prompt.hotkeySlot) {
+      const slotBadge = new St.Label({
+        text: "⌨" + prompt.hotkeySlot,
+        style_class: "prompt-vault-hotkey-badge",
+      });
+      new Tooltips.Tooltip(
+        slotBadge,
+        _("Keyboard slot") + " " + prompt.hotkeySlot + " (" + _("Super") + "+Shift+" + prompt.hotkeySlot + ")"
+      );
+      titleRow.add(slotBadge, { expand: false, y_align: St.Align.MIDDLE, y_fill: false });
+    }
     body.add(titleRow, { x_fill: true });
 
     const preview = new St.Label({
@@ -1672,6 +1875,18 @@ class PromptVaultDesklet extends Desklet.Desklet {
   }
 
   _commitPrompt(existing, values) {
+    const slot = _normalizeHotkeySlot(values.hotkeySlot);
+    values.hotkeySlot = slot;
+    if (slot) {
+      const keepId = existing ? existing.id : null;
+      for (const p of this._prompts) {
+        if (p.hotkeySlot === slot && p.id !== keepId) {
+          p.hotkeySlot = 0;
+          p.updatedAt = _nowIso();
+        }
+      }
+    }
+
     if (existing) {
       const idx = this._prompts.findIndex((p) => p.id === existing.id);
       if (idx < 0) {
@@ -1684,6 +1899,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
       this._prompts.push(
         Object.assign({ id: GLib.uuid_string_random() }, values, {
           favorite: false,
+          hotkeySlot: slot,
           createdAt: now,
           updatedAt: now,
           lastUsedAt: null,
@@ -1706,6 +1922,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
         id: GLib.uuid_string_random(),
         title: _clampStr(prompt.title + " " + _("(copy)"), LIMITS.title),
         favorite: false,
+        hotkeySlot: 0,
         createdAt: now,
         updatedAt: now,
         lastUsedAt: null,
@@ -1808,6 +2025,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
         for (const p of incoming) byId.set(p.id, p);
         this._prompts = Array.from(byId.values());
       }
+      this._dedupeHotkeySlots();
       if (this._saveData({ backup: true })) {
         this._categoryFilter = "all";
         this._favoritesOnly = false;
@@ -1841,6 +2059,46 @@ class PromptVaultDesklet extends Desklet.Desklet {
     }
   }
 
+  _setupKeyboardShortcuts() {
+    const setupPath = this._resolveBinScript("prompt-vault-setup-shortcuts");
+    const copyPath = this._resolveBinScript("prompt-vault-copy");
+    if (!setupPath || !copyPath) {
+      this._setStatus(_("Shortcut tools missing — run ./install.sh from the repo."), true);
+      Main.notify(
+        _("Prompt Vault"),
+        _("Install the shortcut helpers first:\n./install.sh\n\nThen click Shortcuts again.")
+      );
+      return;
+    }
+
+    const envPatch = { PROMPT_VAULT_COPY_CMD: copyPath };
+    const dataDir = this._getDataDir();
+    if (dataDir !== this._getDefaultDataDir()) {
+      envPatch.PROMPT_VAULT_DATA_DIR = dataDir;
+    }
+
+    try {
+      GLib.spawn_async(
+        null,
+        [setupPath],
+        this._spawnEnvPatch(envPatch),
+        GLib.SpawnFlags.SEARCH_PATH | GLib.SpawnFlags.DO_NOT_REAP_CHILD,
+        null,
+        null
+      );
+      const assigned = this._prompts.filter((p) => p.hotkeySlot).length;
+      const hint =
+        assigned > 0
+          ? _("Super+Shift+1–9 copies assigned slots.")
+          : _("Shortcuts registered. Edit a prompt and pick slot 1–9.");
+      this._setStatus(_("Keyboard shortcuts installed.") + " " + hint);
+      Main.notify(_("Prompt Vault"), _("Global shortcuts installed: Super+Shift+1–9"));
+    } catch (e) {
+      global.logError(`[Prompt Vault] Shortcut setup failed: ${e}`);
+      this._setStatus(_("Could not install keyboard shortcuts."), true);
+    }
+  }
+
   // -- Context menu ---------------------------------------------------------
 
   _buildContextMenu() {
@@ -1852,6 +2110,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
     };
 
     add(_("Add prompt"), () => this._openEditor(null));
+    add(_("Install keyboard shortcuts"), () => this._setupKeyboardShortcuts());
     this._menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
     add(_("Export backup"), () => this._exportBackup());
     add(_("Import (merge)"), () => this._importBackup(false));

@@ -17,6 +17,9 @@ you reuse, find them instantly, and copy them to the clipboard with one click.
   like *"Summarize {{topic}} in {{n}} bullet points"*.
 - **Usage stats** — prompts remember how often and how recently they were copied,
   and can be sorted by "most copied" or "recently used".
+- **Global keyboard shortcuts** — assign each prompt to slot 1–9, install shortcuts once,
+  then press **Super+Shift+1** … **Super+Shift+9** from anywhere to copy that prompt
+  (raw text; `{{placeholder}}` fill is skipped on hotkey copy).
 - **Favorites, duplicate, edit, delete** — edit opens a proper dialog; template fill stays inline, with optional delete
   confirmation.
 - **Backup & restore** — export a timestamped JSON file; import by merge or full
@@ -50,6 +53,29 @@ mechanism as system confirmations) with its own focus and scroll handling.
 | Middle-click | Paste primary selection (X11) |
 | Right-click | Copy / Paste context menu |
 | `Esc` | Cancel the form / clear search |
+
+### Global copy shortcuts (system-wide)
+
+1. Run `./install.sh` (installs CLI helpers into `~/.local/bin`).
+2. In Prompt Vault, **Edit** a prompt → **Keyboard shortcut** → pick slot **1–9**.
+3. Click **Shortcuts** in the toolbar (or right-click → **Install keyboard shortcuts**).
+4. Press **Super+Shift+1** … **Super+Shift+9** anywhere to copy that slot.
+
+| Shortcut | Action |
+| --- | --- |
+| `Super+Shift+1` … `Super+Shift+9` | Copy prompt assigned to that slot |
+
+Change bindings in **Settings → Keyboard → Custom Shortcuts** (entries named
+*Prompt Vault: Slot N*). Re-run **Shortcuts** after changing the data folder in
+desklet settings so commands point at the right `prompts.json`.
+
+CLI (optional):
+
+```bash
+prompt-vault-copy --list          # show slot assignments
+prompt-vault-copy --slot 3        # copy slot 3 manually
+./install.sh --shortcuts          # install desklet + register shortcuts
+```
 
 ## Accessibility & design
 
@@ -110,6 +136,7 @@ and the desklet starts fresh.
   "tags": ["string"],
   "notes": "string",
   "favorite": false,
+  "hotkeySlot": 0,
   "createdAt": "ISO-8601",
   "updatedAt": "ISO-8601",
   "lastUsedAt": "ISO-8601 | null",

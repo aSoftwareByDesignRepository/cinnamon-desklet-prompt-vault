@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Copyright (C) 2026 Alexander Mäule <alex@software-by-design.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Register Cinnamon keyboard shortcuts Super+Shift+1 … 9 for Prompt Vault slots.
+set -euo pipefail
+
+COPY_CMD="${PROMPT_VAULT_COPY_CMD:-${HOME}/.local/bin/prompt-vault-copy}"
+DATA_DIR="${PROMPT_VAULT_DATA_DIR:-}"
+KEYBIND_SCHEMA="org.cinnamon.desktop.keybindings"
+CUSTOM_LIST_KEY="custom-list"
+
+if [[ ! -x "${COPY_CMD}" ]]; then
+  echo "error: prompt-vault-copy not found or not executable: ${COPY_CMD}" >&2
+  echo "Run ./install.sh from the prompt-vault repo first." >&2
+  exit 1
+fi
+
+if ! command -v gsettings >/dev/null 2>&1; then
+  echo "error: gsettings is required (Cinnamon)." >&2
+  exit 1
+fi
+
+# Read current custom shortcut names.
+mapfile -t EXISTING < <(gsettings get "${KEYBIND_SCHEMA}" "${CUSTOM_LIST_KEY}" | tr -d "[]'" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -v '^$' || true)
+
+add_to_list() {
+  local id="$1"
+  local found=0
+  for e in "${EXISTING[@]:-}"; do
+    if [[ "${e}" == "${id}" ]]; then
+      found=1
+      break
+    fi
+  done
+  if [[ "${found}" -eq 0 ]]; then
+    EXISTING+=("${id}")
+  fi
+}
+
+for slot in $(seq 1 9); do
+  id="prompt-vault-slot${slot}"
+  schema="${KEYBIND_SCHEMA}.custom-keybinding:/org/cinnamon/desktop/keybindings/custom-keybindings/${id}/"
+
+  add_to_list "${id}"
+
+  if [[ -n "${DATA_DIR}" ]]; then
+    data_q="$(printf '%q' "${DATA_DIR}")"
+    cmd="${COPY_CMD} --data-dir ${data_q} --slot ${slot} --quiet"
+  else
+    cmd="${COPY_CMD} --slot ${slot} --quiet"
+  fi
+
+  gsettings set "${schema}" name "Prompt Vault: Slot ${slot}"
+  gsettings set "${schema}" command "${cmd}"
+  gsettings set "${schema}" binding "['<Super><Shift>${slot}']"
+done
+
+# Write merged custom-list (preserve unrelated shortcuts).
+if [[ "${#EXISTING[@]}" -eq 0 ]]; then
+  gsettings set "${KEYBIND_SCHEMA}" "${CUSTOM_LIST_KEY}" "['prompt-vault-slot1', 'prompt-vault-slot2', 'prompt-vault-slot3', 'prompt-vault-slot4', 'prompt-vault-slot5', 'prompt-vault-slot6', 'prompt-vault-slot7', 'prompt-vault-slot8', 'prompt-vault-slot9']"
+else
+  joined=""
+  for id in "${EXISTING[@]}"; do
+    [[ -z "${id}" ]] && continue
+    if [[ -n "${joined}" ]]; then
+      joined+=", "
+    fi
+    joined+="'${id}'"
+  done
+  gsettings set "${KEYBIND_SCHEMA}" "${CUSTOM_LIST_KEY}" "[${joined}]"
+fi
+
+echo "Prompt Vault keyboard shortcuts installed:"
+echo "  Super+Shift+1 … Super+Shift+9  →  copy slot 1 … 9 to clipboard"
+echo
+echo "Change key combos: Settings → Keyboard → Custom Shortcuts"
+echo "Assign prompts to slots: Prompt Vault → Edit prompt → Keyboard slot"

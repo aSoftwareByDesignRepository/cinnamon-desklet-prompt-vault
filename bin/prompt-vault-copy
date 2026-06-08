@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+# Copyright (C) 2026 Alexander Mäule <alex@software-by-design.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Copy a Prompt Vault prompt to the clipboard by hotkey slot (1-9)."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+DEFAULT_DATA_DIR = Path.home() / ".local" / "share" / "prompt-vault@alex"
+PROMPTS_FILE = "prompts.json"
+MIN_SLOT = 1
+MAX_SLOT = 9
+
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _data_dir() -> Path:
+    custom = os.environ.get("PROMPT_VAULT_DATA_DIR", "").strip()
+    if not custom:
+        return DEFAULT_DATA_DIR
+    if custom == "~":
+        return Path.home()
+    if custom.startswith("~/"):
+        return Path.home() / custom[2:]
+    return Path(custom).expanduser()
+
+
+def _prompts_path() -> Path:
+    return _data_dir() / PROMPTS_FILE
+
+
+def _load_json_locked(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
+        try:
+            return json.load(fh)
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def _save_json_locked(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="prompts.", suffix=".json", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            json.dump(data, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _parse_prompts(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, dict) and isinstance(payload.get("prompts"), list):
+        return payload["prompts"]
+    if isinstance(payload, list):
+        return payload
+    raise ValueError("prompts file has an unexpected format")
+
+
+def _normalize_slot(raw: Any) -> int:
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return n if MIN_SLOT <= n <= MAX_SLOT else 0
+
+
+def _find_by_slot(prompts: list[dict[str, Any]], slot: int) -> dict[str, Any] | None:
+    for p in prompts:
+        if _normalize_slot(p.get("hotkeySlot")) == slot:
+            return p
+    return None
+
+
+def _copy_to_clipboard(text: str) -> None:
+    env = os.environ.copy()
+    if env.get("WAYLAND_DISPLAY") and shutil_which("wl-copy"):
+        subprocess.run(["wl-copy", "--", text], check=True, env=env)
+        return
+    if shutil_which("xclip"):
+        subprocess.run(
+            ["xclip", "-selection", "clipboard"],
+            input=text.encode("utf-8"),
+            check=True,
+            env=env,
+        )
+        return
+    if shutil_which("xsel"):
+        subprocess.run(
+            ["xsel", "--clipboard", "--input"],
+            input=text.encode("utf-8"),
+            check=True,
+            env=env,
+        )
+        return
+    raise RuntimeError(
+        "No clipboard tool found. Install wl-clipboard (Wayland) or xclip (X11)."
+    )
+
+
+def shutil_which(cmd: str) -> str | None:
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        p = Path(d) / cmd
+        if p.is_file() and os.access(p, os.X_OK):
+            return str(p)
+    return None
+
+
+def _notify(title: str, body: str) -> None:
+    if not shutil_which("notify-send"):
+        return
+    try:
+        subprocess.run(
+            ["notify-send", "-a", "Prompt Vault", "-i", "edit-copy-symbolic", title, body],
+            check=False,
+        )
+    except Exception:
+        pass
+
+
+def cmd_list_slots(path: Path) -> int:
+    if not path.is_file():
+        print(f"No prompts file at {path}", file=sys.stderr)
+        return 1
+    data = _load_json_locked(path)
+    prompts = _parse_prompts(data)
+    print(f"Prompt Vault slots ({MIN_SLOT}-{MAX_SLOT}):")
+    for slot in range(MIN_SLOT, MAX_SLOT + 1):
+        p = _find_by_slot(prompts, slot)
+        if p:
+            title = str(p.get("title", "Untitled")).strip() or "Untitled"
+            print(f"  {slot}: {title}")
+        else:
+            print(f"  {slot}: (empty)")
+    return 0
+
+
+def cmd_copy_slot(path: Path, slot: int, quiet: bool) -> int:
+    if slot < MIN_SLOT or slot > MAX_SLOT:
+        print(f"Slot must be between {MIN_SLOT} and {MAX_SLOT}.", file=sys.stderr)
+        return 2
+
+    if not path.is_file():
+        _notify("Prompt Vault", "No prompts file found.")
+        print(f"No prompts file at {path}", file=sys.stderr)
+        return 1
+
+    data = _load_json_locked(path)
+    prompts = _parse_prompts(data)
+    prompt = _find_by_slot(prompts, slot)
+
+    if not prompt:
+        _notify("Prompt Vault", f"No prompt assigned to slot {slot}.")
+        if not quiet:
+            print(f"Slot {slot} is empty. Assign a slot in Prompt Vault → Edit.", file=sys.stderr)
+        return 3
+
+    content = str(prompt.get("content", ""))
+    if not content.strip():
+        _notify("Prompt Vault", f"Slot {slot} prompt has no text.")
+        print("Prompt content is empty.", file=sys.stderr)
+        return 4
+
+    try:
+        _copy_to_clipboard(content)
+    except Exception as exc:
+        _notify("Prompt Vault", "Could not copy to clipboard.")
+        print(f"Clipboard error: {exc}", file=sys.stderr)
+        return 5
+
+    # Update usage stats (exclusive lock via rewrite).
+    now = _iso_now()
+    for p in prompts:
+        if p is prompt or p.get("id") == prompt.get("id"):
+            p["lastUsedAt"] = now
+            p["useCount"] = int(p.get("useCount") or 0) + 1
+            break
+    if isinstance(data, dict):
+        data["prompts"] = prompts
+        _save_json_locked(path, data)
+    else:
+        _save_json_locked(path, {"version": 1, "exportedAt": now, "prompts": prompts})
+
+    title = str(prompt.get("title", "Untitled")).strip() or "Untitled"
+    _notify("Prompt Vault", f"Copied “{title}” (slot {slot})")
+    if not quiet:
+        print(f"Copied slot {slot}: {title}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Copy a Prompt Vault prompt to the clipboard by hotkey slot."
+    )
+    parser.add_argument(
+        "--slot",
+        "-s",
+        type=int,
+        metavar="N",
+        help=f"Hotkey slot number ({MIN_SLOT}-{MAX_SLOT})",
+    )
+    parser.add_argument(
+        "--list",
+        "-l",
+        action="store_true",
+        help="List which prompts are assigned to each slot",
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=None,
+        help="Override prompts data directory",
+    )
+    parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress stdout messages (notifications still shown)",
+    )
+    args = parser.parse_args()
+
+    if args.data_dir is not None:
+        os.environ["PROMPT_VAULT_DATA_DIR"] = str(args.data_dir.expanduser())
+
+    path = _prompts_path()
+
+    if args.list:
+        return cmd_list_slots(path)
+
+    if args.slot is None:
+        parser.print_help(sys.stderr)
+        return 2
+
+    return cmd_copy_slot(path, args.slot, args.quiet)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
