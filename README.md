@@ -124,3 +124,14 @@ rm ~/.local/share/cinnamon/desklets/prompt-vault@alex
 ```
 
 Your data in `~/.local/share/prompt-vault@alex/` is left untouched.
+
+## License
+
+Copyright © 2026 [Alexander Mäule](https://software-by-design.de).
+
+Prompt Vault is free software: you can redistribute it and/or modify it under the
+terms of the [GNU Affero General Public License v3.0 or later](LICENSE).
+
+## Author
+
+**Alexander Mäule** — [software-by-design.de](https://software-by-design.de) · [alex@software-by-design.de](mailto:alex@software-by-design.de) · [LinkedIn](https://www.linkedin.com/in/alexander-m%C3%A4ule-7788a7a/)

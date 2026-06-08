@@ -3,6 +3,6 @@
   "name": "Prompt Vault",
   "description": "Store, search and copy reusable prompts. Categories, tags, favorites, usage stats, {{placeholder}} fill-in, and JSON backup/restore.",
   "version": "1.7.0",
-  "author": "alex",
+  "author": "Alexander Mäule",
   "max-instances": 1
 }

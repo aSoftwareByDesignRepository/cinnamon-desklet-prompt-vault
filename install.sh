@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Alexander Mäule <alex@software-by-design.de>
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Install (or update) the Prompt Vault desklet for the current user.
 # Uses a symlink so edits in this repo are picked up after a Cinnamon reload.

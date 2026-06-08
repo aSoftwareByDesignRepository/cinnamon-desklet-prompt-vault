@@ -1,6 +1,11 @@
 /*
  * Prompt Vault — a Cinnamon desklet to store, search and copy reusable prompts.
  *
+ * Copyright (C) 2026 Alexander Mäule <alex@software-by-design.de>
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * https://software-by-design.de
+ * https://www.linkedin.com/in/alexander-m%C3%A4ule-7788a7a/
+ *
  * Design notes (verified against Cinnamon 6.0.4 / cjs on Linux Mint):
  *  - Desklet is an ES6 class and is safe to extend.
  *  - Add/edit uses a Cinnamon ModalDialog (proper layout, focus & scroll).
