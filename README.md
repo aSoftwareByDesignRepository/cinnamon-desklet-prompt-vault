@@ -148,6 +148,17 @@ and the desklet starts fresh.
 }
 ```
 
+## Tests
+
+Domain logic lives in `prompt-vault@alex/pv_core.js` (shared by the desklet and Node).
+
+```bash
+npm install
+npm run test:coverage    # unit + integration, coverage gates on pv_core.js
+npm run test:python      # CLI slot/file helpers
+npm run test:mutation    # Stryker on pv_core.js (break threshold 80)
+```
+
 ## Uninstall
 
 ```bash

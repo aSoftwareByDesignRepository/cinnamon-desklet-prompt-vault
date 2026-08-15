@@ -1,0 +1,9 @@
+node_modules/
+coverage/
+.nyc_output/
+reports/
+.stryker-tmp/
+*.lcov
+__pycache__/
+.pytest_cache/
+.coverage

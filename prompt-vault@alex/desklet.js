@@ -46,14 +46,17 @@ const Main = imports.ui.main;
 const CinnamonEntry = imports.ui.cinnamonEntry;
 
 const UUID = "prompt-vault@alex";
-const DATA_VERSION = 1;
 const DEFAULT_DATA_SUBDIR = ["prompt-vault@alex"];
 // Must match prompt-vault-setup-shortcuts default (Super+Ctrl avoids Super+1–9 app-switch conflicts).
 const HOTKEY_COMBO_LABEL = _("Super") + "+Ctrl+";
 
-// Hard limits to keep the UI and data files sane and resistant to malformed
-// or hostile import files.
-const LIMITS = {
+// ---------------------------------------------------------------------------
+// Domain core (pv_core.js) — loaded before construction via metadata.path.
+// ---------------------------------------------------------------------------
+
+let PvCore = null;
+let DATA_VERSION = 1;
+let LIMITS = {
   title: 200,
   category: 60,
   tag: 40,
@@ -63,14 +66,25 @@ const LIMITS = {
   templateVars: 30,
 };
 
-const TEMPLATE_RE = /\{\{\s*([^{}]+?)\s*\}\}/g;
-
-// ---------------------------------------------------------------------------
-// Pure helpers (no Cinnamon state) — easy to reason about and test.
-// ---------------------------------------------------------------------------
+function _ensureCore(metadata) {
+  if (PvCore) return PvCore;
+  if (!metadata || !metadata.path) throw new Error("Prompt Vault: missing metadata.path");
+  imports.searchPath.unshift(metadata.path);
+  PvCore = imports.pv_core;
+  DATA_VERSION = PvCore.DATA_VERSION;
+  LIMITS = PvCore.LIMITS;
+  return PvCore;
+}
 
 function _nowIso() {
   return new Date().toISOString();
+}
+
+function _coreDeps() {
+  return {
+    uuid: () => GLib.uuid_string_random(),
+    now: _nowIso,
+  };
 }
 
 function _decode(bytes) {
@@ -82,101 +96,43 @@ function _decode(bytes) {
 }
 
 function _asStr(v) {
-  if (typeof v === "string") return v;
-  if (v === null || v === undefined) return "";
-  return String(v);
+  return PvCore.asStr(v);
 }
 
 function _clampStr(s, max) {
-  s = _asStr(s);
-  return s.length > max ? s.slice(0, max) : s;
-}
-
-function _asIso(v) {
-  if (typeof v !== "string" || !v) return null;
-  const t = Date.parse(v);
-  return Number.isFinite(t) ? v : null;
-}
-
-function _asCount(v) {
-  const n = Number(v);
-  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+  return PvCore.clampStr(s, max);
 }
 
 function _normalizeHotkeySlot(v) {
-  const n = Number(v);
-  if (!Number.isFinite(n) || n < 1 || n > 9) return 0;
-  return Math.floor(n);
+  return PvCore.normalizeHotkeySlot(v);
 }
 
 function _isPlainObject(v) {
-  return !!v && typeof v === "object" && !Array.isArray(v);
-}
-
-function _normalizeTags(raw) {
-  let arr;
-  if (Array.isArray(raw)) arr = raw;
-  else if (typeof raw === "string") arr = raw.split(",");
-  else return [];
-
-  const out = [];
-  const seen = new Set();
-  for (let t of arr) {
-    t = _clampStr(String(t).trim(), LIMITS.tag);
-    const key = t.toLowerCase();
-    if (t && !seen.has(key)) {
-      seen.add(key);
-      out.push(t);
-      if (out.length >= LIMITS.tagsCount) break;
-    }
-  }
-  return out;
+  return PvCore.isPlainObject(v);
 }
 
 function _tagsToString(tags) {
-  return _normalizeTags(tags).join(", ");
+  return PvCore.tagsToString(tags);
+}
+
+function _normalizeTags(raw) {
+  return PvCore.normalizeTags(raw);
 }
 
 function _extractTemplateVars(content) {
-  TEMPLATE_RE.lastIndex = 0;
-  const seen = new Set();
-  const out = [];
-  let m;
-  while ((m = TEMPLATE_RE.exec(content)) !== null) {
-    const name = m[1].trim();
-    if (name && !seen.has(name)) {
-      seen.add(name);
-      out.push(name);
-      if (out.length >= LIMITS.templateVars) break;
-    }
-  }
-  return out;
+  return PvCore.extractTemplateVars(content);
 }
 
 function _applyTemplate(content, values) {
-  return content.replace(TEMPLATE_RE, (match, rawName) => {
-    const key = rawName.trim();
-    return Object.prototype.hasOwnProperty.call(values, key) ? values[key] : match;
-  });
+  return PvCore.applyTemplate(content, values);
 }
 
 function _sanitizePrompt(raw) {
-  const p = _isPlainObject(raw) ? raw : {};
-  const now = _nowIso();
-  return {
-    id: typeof p.id === "string" && p.id ? p.id : GLib.uuid_string_random(),
-    title: _clampStr(_asStr(p.title).trim() || "Untitled", LIMITS.title),
-    category: _clampStr(_asStr(p.category).trim() || "General", LIMITS.category),
-    content: _clampStr(_asStr(p.content), LIMITS.content),
-    tags: _normalizeTags(p.tags),
-    notes: _clampStr(_asStr(p.notes), LIMITS.notes),
-    favorite: !!p.favorite,
-    hotkeySlot: _normalizeHotkeySlot(p.hotkeySlot),
-    createdAt: _asIso(p.createdAt) || now,
-    updatedAt: _asIso(p.updatedAt) || _asIso(p.createdAt) || now,
-    lastUsedAt: _asIso(p.lastUsedAt),
-    useCount: _asCount(p.useCount),
-  };
+  return PvCore.sanitizePrompt(raw, _coreDeps());
+}
+
+function _formatHotkeyBadge(slot) {
+  return PvCore.formatHotkeyLabel(slot, _("Super"));
 }
 
 function _samplePrompts() {
@@ -601,6 +557,7 @@ function _deleteEntrySelection(entry) {
 class PromptVaultDesklet extends Desklet.Desklet {
   constructor(metadata, deskletId) {
     super(metadata, deskletId);
+    _ensureCore(metadata);
 
     this._destroyed = false;
     this._prompts = [];
@@ -613,6 +570,8 @@ class PromptVaultDesklet extends Desklet.Desklet {
     this._openDialogs = new Set();
     this._editDialog = null;
     this._viewMode = "list";
+    this._rowMenu = null;
+    this._rowMenuManager = null;
 
     // Keyboard-grab state (see "KEYBOARD INPUT" notes at the top of this file).
     this._grabbed = false;
@@ -623,21 +582,45 @@ class PromptVaultDesklet extends Desklet.Desklet {
     this._settings = new Settings.DeskletSettings(this, metadata.uuid, deskletId);
     this._settings.bind("data_dir", "data_dir", this._onDataDirChanged.bind(this));
     this._settings.bind("sort_mode", "sort_mode", this._renderList.bind(this));
+    this._settings.bind("default_filter", "default_filter", this._onDefaultFilterChanged.bind(this));
+    this._settings.bind("default_category", "default_category", this._onDefaultFilterChanged.bind(this));
     this._settings.bind("show_tags", "show_tags", this._renderList.bind(this));
     this._settings.bind("show_usage", "show_usage", this._renderList.bind(this));
     this._settings.bind("confirm_delete", "confirm_delete", null);
     this._settings.bind("auto_backup", "auto_backup", null);
     this._settings.bind("enable_templates", "enable_templates", null);
-    this._settings.bind("panel_width", "panel_width", this._applyDimensions.bind(this));
-    this._settings.bind("list_height", "list_height", this._applyDimensions.bind(this));
+    this._settings.bind("panel_width", "panel_width", this._onDimensionsChanged.bind(this));
+    this._settings.bind("list_height", "list_height", this._onDimensionsChanged.bind(this));
 
     this.setHeader(_("Prompt Vault"));
 
     this._loadData();
+    this._applyDefaultFilter();
     this._buildUi();
     this._buildContextMenu();
     this._applyDimensions();
     this._renderList();
+  }
+
+  _applyDefaultFilter() {
+    const resolved = PvCore.resolveDefaultFilter(
+      this.default_filter,
+      this.default_category,
+      PvCore.uniqueCategories(this._prompts)
+    );
+    this._favoritesOnly = resolved.favoritesOnly;
+    this._categoryFilter = resolved.categoryFilter;
+  }
+
+  _onDefaultFilterChanged() {
+    this._applyDefaultFilter();
+    if (this._viewMode === "list") this._renderList();
+  }
+
+  _onDimensionsChanged() {
+    this._applyDimensions();
+    // Row title wrap widths depend on panel width — rebuild list when it changes.
+    if (this._viewMode === "list") this._renderList();
   }
 
   // -- Paths & storage ------------------------------------------------------
@@ -702,18 +685,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
   }
 
   _dedupeHotkeySlots() {
-    const seen = new Set();
-    for (const p of this._prompts) {
-      const slot = _normalizeHotkeySlot(p.hotkeySlot);
-      p.hotkeySlot = slot;
-      if (!slot) continue;
-      if (seen.has(slot)) {
-        p.hotkeySlot = 0;
-        p.updatedAt = _nowIso();
-      } else {
-        seen.add(slot);
-      }
-    }
+    PvCore.dedupeHotkeySlots(this._prompts, _nowIso);
   }
 
   _setMode(file, mode) {
@@ -783,11 +755,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
       const [ok, contents] = file.load_contents(null);
       if (!ok) throw new Error("file could not be read");
       const parsed = JSON.parse(_decode(contents));
-      const list = _isPlainObject(parsed) && Array.isArray(parsed.prompts)
-        ? parsed.prompts
-        : Array.isArray(parsed)
-        ? parsed
-        : null;
+      const list = PvCore.parsePromptsPayload(parsed);
       if (!list) throw new Error("unexpected data format");
       this._prompts = list.map(_sanitizePrompt);
       this._dedupeHotkeySlots();
@@ -852,8 +820,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
     if (this._editDialog) this._editDialog.close();
     if (this._viewMode !== "list") this._showListView();
     this._loadData();
-    this._categoryFilter = "all";
-    this._favoritesOnly = false;
+    this._applyDefaultFilter();
     this._renderList();
     this._setStatus(_("Loaded prompts from the configured folder."));
   }
@@ -1090,17 +1057,17 @@ class PromptVaultDesklet extends Desklet.Desklet {
   }
 
   _getPanelWidth() {
-    return Math.max(260, Math.min(640, Number(this.panel_width) || 340));
+    return PvCore.clampPanelWidth(this.panel_width);
   }
 
   _getInnerContentWidth(panelWidth) {
-    const w = panelWidth || this._getPanelWidth();
-    // Root padding (32px) + scroll/form padding (~4px).
-    return Math.max(200, w - 36);
+    return PvCore.innerContentWidth(panelWidth || this._getPanelWidth());
   }
 
   // St.ScrollView does not propagate parent width to its child. Without an
   // explicit width the inner form stays at 0px wide — labels and entries vanish.
+  // IMPORTANT: only use this for form panels. Never force the prompt list box
+  // wider than the scroll viewport — that clips the row action buttons.
   _layoutScrollContent(scrollView, innerBox, panelWidth) {
     if (!innerBox) return;
     const innerW = this._getInnerContentWidth(panelWidth);
@@ -1147,12 +1114,13 @@ class PromptVaultDesklet extends Desklet.Desklet {
 
   _applyDimensions() {
     const w = this._getPanelWidth();
-    const h = Math.max(140, Math.min(720, Number(this.list_height) || 300));
+    const h = PvCore.clampListHeight(this.list_height);
     const formH = Math.max(200, Math.min(520, h + 80));
     if (this._root) {
       this._root.style = `width: ${w}px; max-width: ${w}px; min-width: ${w}px;`;
     }
-    if (this._scrollView) this._scrollView.style = `height: ${h}px;`;
+    // Fixed list height keeps the toolbar + status pinned below the scroll area.
+    if (this._scrollView) this._scrollView.style = `height: ${h}px; max-height: ${h}px;`;
     if (this._templateScroll) this._templateScroll.style = `height: ${formH}px; min-height: ${formH}px;`;
     this._layoutScrollContent(this._templateScroll, this._templateFieldsBox, w);
     this._layoutToolbar();
@@ -1554,12 +1522,13 @@ class PromptVaultDesklet extends Desklet.Desklet {
 
     const w = this._getPanelWidth();
     const btns = this._toolbarBtns;
+    const mode = PvCore.toolbarLayoutMode(w);
     this._clearToolbarRows();
     this._toolbar.remove_style_class_name("prompt-vault-toolbar-compact");
 
-    if (w >= 520) {
+    if (mode === "one-row") {
       this._addToolbarRow(btns, true);
-    } else if (w >= 300) {
+    } else if (mode === "two-row") {
       this._addToolbarRow(btns.slice(0, 2), true);
       this._addToolbarRow(btns.slice(2), true);
     } else {
@@ -1630,48 +1599,16 @@ class PromptVaultDesklet extends Desklet.Desklet {
   // -- Filtering & rendering ------------------------------------------------
 
   _getCategories() {
-    const set = new Set();
-    for (const p of this._prompts) if (p.category) set.add(p.category);
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
+    return PvCore.uniqueCategories(this._prompts);
   }
 
   _filteredPrompts() {
-    let items = this._prompts.slice();
-
-    if (this._favoritesOnly) {
-      items = items.filter((p) => p.favorite);
-    } else if (this._categoryFilter !== "all") {
-      items = items.filter((p) => p.category === this._categoryFilter);
-    }
-
-    if (this._searchQuery) {
-      const q = this._searchQuery;
-      items = items.filter((p) =>
-        [p.title, p.category, p.content, p.notes, _tagsToString(p.tags)]
-          .join(" ")
-          .toLowerCase()
-          .includes(q)
-      );
-    }
-
-    const mode = this.sort_mode || "recent";
-    items.sort((a, b) => {
-      if (a.favorite !== b.favorite) return a.favorite ? -1 : 1;
-      if (mode === "title") return a.title.localeCompare(b.title);
-      if (mode === "category") {
-        const c = a.category.localeCompare(b.category);
-        return c !== 0 ? c : a.title.localeCompare(b.title);
-      }
-      if (mode === "uses") {
-        const d = (b.useCount || 0) - (a.useCount || 0);
-        return d !== 0 ? d : a.title.localeCompare(b.title);
-      }
-      const at = a.lastUsedAt || a.updatedAt || a.createdAt || "";
-      const bt = b.lastUsedAt || b.updatedAt || b.createdAt || "";
-      return bt.localeCompare(at);
+    return PvCore.filterAndSortPrompts(this._prompts, {
+      favoritesOnly: this._favoritesOnly,
+      categoryFilter: this._categoryFilter,
+      searchQuery: this._searchQuery,
+      sortMode: this.sort_mode || "recent",
     });
-
-    return items;
   }
 
   _renderFilters() {
@@ -1687,6 +1624,14 @@ class PromptVaultDesklet extends Desklet.Desklet {
           (extraClass ? " " + extraClass : ""),
       });
       this._a11y(chip, label);
+      try {
+        // Keep full category names; the filter row scrolls horizontally.
+        if (chip.label_actor && chip.label_actor.clutter_text) {
+          chip.label_actor.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+        }
+      } catch (e) {
+        /* ignore */
+      }
       chip.connect("clicked", () => onClick());
       this._filterRow.add(chip, { expand: false });
     };
@@ -1720,6 +1665,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
 
   _renderList() {
     if (!this._listBox) return;
+    this._closeRowMenu();
     this._renderFilters();
     this._listBox.destroy_all_children();
 
@@ -1748,7 +1694,11 @@ class PromptVaultDesklet extends Desklet.Desklet {
     }
 
     for (const prompt of items) {
-      this._listBox.add(this._buildPromptRow(prompt), { x_fill: true });
+      try {
+        this._listBox.add(this._buildPromptRow(prompt), { x_fill: true });
+      } catch (e) {
+        global.logError(`[Prompt Vault] Failed to render prompt “${prompt && prompt.title}”: ${e}`);
+      }
     }
   }
 
@@ -1760,7 +1710,6 @@ class PromptVaultDesklet extends Desklet.Desklet {
   _buildPromptRow(prompt) {
     const row = new St.BoxLayout({ vertical: false, style_class: "prompt-vault-row" });
 
-    // Favorite toggle.
     const star = this._mkIconBtn(
       prompt.favorite ? "starred-symbolic" : "non-starred-symbolic",
       prompt.favorite ? _("Remove from favorites") : _("Add to favorites"),
@@ -1769,80 +1718,179 @@ class PromptVaultDesklet extends Desklet.Desklet {
     );
     row.add(star, { expand: false, y_align: St.Align.START, y_fill: false });
 
-    // Clickable body → copy.
-    const body = new St.BoxLayout({ vertical: true, style_class: "prompt-vault-row-body" });
+    // Use a plain box (not St.Button) so content stays left-aligned — St.Button
+    // centers its child and caused the large gap after the star.
+    const body = new St.BoxLayout({
+      vertical: true,
+      reactive: true,
+      can_focus: true,
+      style_class: "prompt-vault-row-body prompt-vault-row-bodybtn",
+      track_hover: true,
+    });
 
-    const titleRow = new St.BoxLayout({ vertical: false });
     const title = new St.Label({ text: prompt.title, style_class: "prompt-vault-row-title" });
     title.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-    titleRow.add(title, { expand: true, x_fill: true });
-    const badge = new St.Label({ text: prompt.category, style_class: "prompt-vault-category" });
-    badge.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-    titleRow.add(badge, { expand: false, y_align: St.Align.MIDDLE, y_fill: false });
-    if (prompt.hotkeySlot) {
-      const slotBadge = new St.Label({
-        text: "⌨" + prompt.hotkeySlot,
-        style_class: "prompt-vault-hotkey-badge",
-      });
-      new Tooltips.Tooltip(
-        slotBadge,
-        _("Paste via") + " " + HOTKEY_COMBO_LABEL + prompt.hotkeySlot
-      );
-      titleRow.add(slotBadge, { expand: false, y_align: St.Align.MIDDLE, y_fill: false });
-    }
-    body.add(titleRow, { x_fill: true });
+    body.add(title, { x_fill: true, expand: false });
 
-    const preview = new St.Label({
-      text: prompt.content.replace(/\s+/g, " ").trim(),
-      style_class: "prompt-vault-row-preview",
-    });
-    preview.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-    body.add(preview, { x_fill: true });
+    if (prompt.hotkeySlot) {
+      const combo = _formatHotkeyBadge(prompt.hotkeySlot);
+      const shortcut = new St.Label({
+        text: combo,
+        style_class: "prompt-vault-row-shortcut",
+      });
+      shortcut.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+      new Tooltips.Tooltip(shortcut, _("Paste via") + " " + combo);
+      body.add(shortcut, { x_fill: true, expand: false });
+    }
+
+    const chips = new St.BoxLayout({ vertical: false, style_class: "prompt-vault-row-chips" });
+    const cat = new St.Label({ text: prompt.category, style_class: "prompt-vault-category" });
+    cat.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+    chips.add(cat, { expand: false, y_align: St.Align.MIDDLE, y_fill: false });
 
     if (this.show_tags && prompt.tags.length) {
-      const tags = new St.Label({
-        text: "# " + prompt.tags.join("  # "),
-        style_class: "prompt-vault-row-tags",
+      const maxTags = 3;
+      const shown = prompt.tags.slice(0, maxTags);
+      for (const tag of shown) {
+        const chip = new St.Label({
+          text: "#" + tag,
+          style_class: "prompt-vault-tag-chip",
+        });
+        chip.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+        chips.add(chip, { expand: false, y_align: St.Align.MIDDLE, y_fill: false });
+      }
+      if (prompt.tags.length > maxTags) {
+        chips.add(
+          new St.Label({
+            text: "+" + (prompt.tags.length - maxTags),
+            style_class: "prompt-vault-tag-chip",
+          }),
+          { expand: false, y_align: St.Align.MIDDLE, y_fill: false }
+        );
+      }
+    }
+
+    if (this.show_usage && prompt.useCount) {
+      const usage = new St.Label({
+        text: `${prompt.useCount}×`,
+        style_class: "prompt-vault-row-usage",
       });
-      tags.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-      body.add(tags, { x_fill: true });
-    }
-
-    if (prompt.notes) {
-      const notes = new St.Label({ text: prompt.notes, style_class: "prompt-vault-row-notes" });
-      notes.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-      body.add(notes, { x_fill: true });
-    }
-
-    if (this.show_usage) {
-      const usage = new St.Label({ text: this._usageText(prompt), style_class: "prompt-vault-row-usage" });
-      body.add(usage, { x_fill: true });
+      chips.add(usage, { expand: false, y_align: St.Align.MIDDLE, y_fill: false });
       row._pvUsageLabel = usage;
     }
+    body.add(chips, { x_fill: true, expand: false });
 
-    const bodyBtn = new St.Button({
-      style_class: "prompt-vault-row-bodybtn",
-      can_focus: true,
-      child: body,
-      x_expand: true,
+    this._a11y(body, _("Copy") + ": " + prompt.title);
+    new Tooltips.Tooltip(body, _("Click to copy to clipboard"));
+    body.connect("button-release-event", (_a, event) => {
+      if (event.get_button() === 1) {
+        this._copyPrompt(prompt, row);
+        return Clutter.EVENT_STOP;
+      }
+      return Clutter.EVENT_PROPAGATE;
     });
-    this._a11y(bodyBtn, _("Copy") + ": " + prompt.title);
-    new Tooltips.Tooltip(bodyBtn, _("Click to copy to clipboard"));
-    bodyBtn.connect("clicked", () => this._copyPrompt(prompt, row));
-    row.add(bodyBtn, { expand: true, x_fill: true });
+    body.connect("key-press-event", (_a, event) => {
+      const sym = event.get_key_symbol();
+      if (sym === Clutter.KEY_Return || sym === Clutter.KEY_KP_Enter || sym === Clutter.KEY_space) {
+        this._copyPrompt(prompt, row);
+        return Clutter.EVENT_STOP;
+      }
+      return Clutter.EVENT_PROPAGATE;
+    });
+    row.add(body, { expand: true, x_fill: true });
 
-    // Action buttons.
     const actions = new St.BoxLayout({ vertical: false, style_class: "prompt-vault-actions" });
-    actions.add(this._mkIconBtn("edit-copy-symbolic", _("Copy to clipboard"), () => this._copyPrompt(prompt, row)));
-    actions.add(this._mkIconBtn("document-edit-symbolic", _("Edit"), () => this._openEditor(prompt)));
-    actions.add(this._mkIconBtn("tab-new-symbolic", _("Duplicate"), () => this._duplicatePrompt(prompt)));
-    actions.add(this._mkIconBtn("edit-delete-symbolic", _("Delete"), () => this._deletePrompt(prompt), "prompt-vault-danger"));
+    actions.add(
+      this._mkIconBtn("edit-copy-symbolic", _("Copy to clipboard"), () => this._copyPrompt(prompt, row))
+    );
+    const moreBtn = this._mkIconBtn("open-menu-symbolic", _("More actions"), () => {
+      this._openRowMoreMenu(moreBtn, prompt, row);
+    });
+    actions.add(moreBtn);
     row.add(actions, { expand: false, y_align: St.Align.START, y_fill: false });
 
     return row;
   }
 
   // -- Actions --------------------------------------------------------------
+
+  _ensureRowMenuManager() {
+    if (!this._rowMenuManager) {
+      this._rowMenuManager = new PopupMenu.PopupMenuManager(this);
+    }
+    return this._rowMenuManager;
+  }
+
+  _closeRowMenu() {
+    if (!this._rowMenu) return;
+    const menu = this._rowMenu;
+    this._rowMenu = null;
+    try {
+      if (menu.isOpen) menu.close(false);
+    } catch (e) {
+      /* ignore */
+    }
+    try {
+      if (this._rowMenuManager) this._rowMenuManager.removeMenu(menu);
+    } catch (e) {
+      /* ignore */
+    }
+    try {
+      menu.destroy();
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
+  _openRowMoreMenu(sourceBtn, prompt, row) {
+    try {
+      this._closeRowMenu();
+
+      // Cinnamon PopupMenu(sourceActor, orientation) — NOT (actor, align, side).
+      const menu = new PopupMenu.PopupMenu(sourceBtn, St.Side.TOP);
+      menu.actor.add_style_class_name("prompt-vault-row-menu");
+      try {
+        Main.uiGroup.add_child(menu.actor);
+      } catch (e) {
+        Main.uiGroup.add_actor(menu.actor);
+      }
+      menu.actor.hide();
+      this._ensureRowMenuManager().addMenu(menu);
+
+      const addItem = (label, fn) => {
+        const item = new PopupMenu.PopupMenuItem(label);
+        item.connect("activate", () => {
+          try {
+            menu.close(true);
+          } catch (e) {
+            /* ignore */
+          }
+          fn();
+        });
+        menu.addMenuItem(item);
+      };
+
+      addItem(_("Edit"), () => this._openEditor(prompt));
+      addItem(_("Duplicate"), () => this._duplicatePrompt(prompt));
+      menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+      addItem(_("Delete"), () => this._deletePrompt(prompt));
+
+      menu.connect("open-state-changed", (_m, isOpen) => {
+        if (!isOpen) {
+          this._addTimeout(0, () => {
+            this._closeRowMenu();
+            return GLib.SOURCE_REMOVE;
+          });
+        }
+      });
+
+      this._rowMenu = menu;
+      menu.open(true);
+    } catch (e) {
+      global.logError(`[Prompt Vault] More menu failed: ${e}`);
+      this._setStatus(_("Could not open the actions menu."), true);
+    }
+  }
 
   _copyPrompt(prompt, row) {
     const vars = this.enable_templates ? _extractTemplateVars(prompt.content) : [];
@@ -1868,7 +1916,8 @@ class PromptVaultDesklet extends Desklet.Desklet {
       this._saveData({ backup: false });
       if (row && row._pvUsageLabel) {
         try {
-          row._pvUsageLabel.set_text(this._usageText(this._prompts[idx]));
+          const n = this._prompts[idx].useCount || 0;
+          row._pvUsageLabel.set_text(n ? `${n}×` : "");
         } catch (e) {
           /* row gone */
         }
@@ -2024,11 +2073,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
       return;
     }
 
-    const rawList = _isPlainObject(parsed) && Array.isArray(parsed.prompts)
-      ? parsed.prompts
-      : Array.isArray(parsed)
-      ? parsed
-      : null;
+    const rawList = PvCore.parsePromptsPayload(parsed);
     if (!rawList) {
       this._setStatus(_("Import failed: no prompts found in the file."), true);
       return;
@@ -2039,14 +2084,11 @@ class PromptVaultDesklet extends Desklet.Desklet {
       if (replace) {
         this._prompts = incoming;
       } else {
-        const byId = new Map(this._prompts.map((p) => [p.id, p]));
-        for (const p of incoming) byId.set(p.id, p);
-        this._prompts = Array.from(byId.values());
+        this._prompts = PvCore.mergePromptsById(this._prompts, incoming);
       }
       this._dedupeHotkeySlots();
       if (this._saveData({ backup: true })) {
-        this._categoryFilter = "all";
-        this._favoritesOnly = false;
+        this._applyDefaultFilter();
         this._renderList();
         this._setStatus(`${_("Imported")} ${incoming.length} ${_("prompt(s).")}`);
       }
@@ -2146,6 +2188,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
 
   on_desklet_removed() {
     this._destroyed = true;
+    this._closeRowMenu();
     this._releaseGrab();
 
     if (this._statusTimeoutId) {

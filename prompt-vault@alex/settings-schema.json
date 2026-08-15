@@ -43,6 +43,23 @@
       "Most copied": "uses"
     }
   },
+  "default_filter": {
+    "type": "combobox",
+    "default": "all",
+    "description": "Default filter when the desklet starts",
+    "tooltip": "Applied on startup and after reload. You can still change the filter chips anytime during the session.",
+    "options": {
+      "All prompts": "all",
+      "Favorites": "favorites",
+      "Specific category…": "category"
+    }
+  },
+  "default_category": {
+    "type": "entry",
+    "default": "General",
+    "description": "Default category name",
+    "tooltip": "Used when Default filter is “Specific category…”. Match the category name as shown on the chips (e.g. General)."
+  },
   "head-display": {
     "type": "header",
     "description": "Display"
@@ -61,20 +78,20 @@
   },
   "panel_width": {
     "type": "scale",
-    "default": 340,
+    "default": 400,
     "min": 260,
     "max": 640,
     "step": 10,
     "description": "Desklet width (px)",
-    "tooltip": "Overall width of the desklet."
+    "tooltip": "Overall width of the desklet. Wider widths show more of each prompt title."
   },
   "list_height": {
     "type": "scale",
-    "default": 300,
+    "default": 280,
     "min": 140,
     "max": 720,
     "step": 20,
     "description": "Prompt list height (px)",
-    "tooltip": "Height of the scrollable prompt list."
+    "tooltip": "Height of the scrollable prompt list. Toolbar buttons stay fixed below this area."
   }
 }

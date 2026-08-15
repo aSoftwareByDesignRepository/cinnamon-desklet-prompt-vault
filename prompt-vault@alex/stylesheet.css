@@ -116,14 +116,14 @@
 }
 
 .prompt-vault-list {
-  spacing: 8px;
-  padding: 2px;
+  spacing: 4px;
+  padding: 1px;
 }
 
 .prompt-vault-row {
-  spacing: 4px;
-  padding: 9px;
-  border-radius: 12px;
+  spacing: 2px;
+  padding: 5px 6px;
+  border-radius: 10px;
   background-color: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
@@ -139,7 +139,7 @@
 }
 
 .prompt-vault-row-bodybtn {
-  padding: 3px 7px;
+  padding: 2px 4px;
   border-radius: 8px;
   border: 2px solid transparent;
 }
@@ -159,60 +159,73 @@
 
 .prompt-vault-row-title {
   font-weight: bold;
-  font-size: 1.02em;
+  font-size: 0.98em;
   color: #ffffff;
+}
+
+.prompt-vault-row-shortcut {
+  font-size: 0.78em;
+  font-weight: bold;
+  color: #9cc0ff;
+}
+
+.prompt-vault-row-chips {
+  spacing: 5px;
 }
 
 .prompt-vault-category {
-  font-size: 0.74em;
+  font-size: 0.7em;
   color: #ffffff;
-  padding: 1px 9px;
-  border-radius: 9px;
+  padding: 1px 6px;
+  border-radius: 7px;
   background-color: rgba(128, 138, 158, 0.55);
-  max-width: 130px;
+  max-width: 100px;
+}
+
+.prompt-vault-tag-chip {
+  font-size: 0.7em;
+  color: #9cc0ff;
+  padding: 1px 6px;
+  border-radius: 7px;
+  background-color: rgba(76, 141, 255, 0.22);
+  max-width: 80px;
 }
 
 .prompt-vault-hotkey-badge {
-  font-size: 0.74em;
+  font-size: 0.72em;
   color: #ffffff;
-  padding: 1px 8px;
-  border-radius: 9px;
+  padding: 1px 6px;
+  border-radius: 7px;
   background-color: rgba(76, 141, 255, 0.55);
   font-weight: bold;
 }
 
 .prompt-vault-row-preview {
-  font-size: 0.85em;
+  font-size: 0.78em;
   color: #cdd1da;
 }
 
-.prompt-vault-row-tags {
-  font-size: 0.78em;
-  color: #9cc0ff;
-}
-
-.prompt-vault-row-notes {
-  font-size: 0.78em;
-  color: #bcc0ca;
-  font-style: italic;
-}
-
 .prompt-vault-row-usage {
-  font-size: 0.72em;
+  font-size: 0.7em;
   color: #a4aab6;
-  padding-top: 1px;
+  padding: 1px 5px;
+  border-radius: 7px;
+  background-color: rgba(255, 255, 255, 0.08);
 }
 
 /* ---- Buttons ------------------------------------------------------------ */
 .prompt-vault-actions {
-  spacing: 1px;
+  spacing: 0px;
+  padding-left: 2px;
 }
 
 .prompt-vault-icon-btn {
-  padding: 6px;
-  border-radius: 8px;
+  padding: 3px;
+  border-radius: 6px;
   color: #dde0e7;
   border: 2px solid transparent;
+  min-width: 24px;
+  min-height: 24px;
 }
 
 .prompt-vault-icon-btn:hover {
@@ -237,7 +250,8 @@
 /* ---- Toolbar ------------------------------------------------------------ */
 .prompt-vault-toolbar {
   spacing: 6px;
-  padding-top: 4px;
+  padding-top: 8px;
+  padding-bottom: 2px;
 }
 
 .prompt-vault-toolbar-row {
