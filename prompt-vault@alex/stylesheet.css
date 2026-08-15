@@ -65,10 +65,6 @@
 }
 
 /* ---- Filter chips ------------------------------------------------------- */
-.prompt-vault-filter-scroll {
-  max-height: 42px;
-}
-
 .prompt-vault-filters {
   spacing: 6px;
   padding: 2px 0;
@@ -81,6 +77,13 @@
   color: #e7e9ee;
   background-color: rgba(255, 255, 255, 0.10);
   border: 2px solid transparent;
+  min-height: 22px;
+}
+
+.prompt-vault-chip-more {
+  min-width: 2em;
+  font-weight: bold;
+  letter-spacing: 0.05em;
 }
 
 .prompt-vault-chip:hover {

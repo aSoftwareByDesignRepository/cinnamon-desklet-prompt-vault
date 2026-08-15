@@ -243,6 +243,58 @@ describe("resolveDefaultFilter", () => {
   });
 });
 
+describe("selectListFilter", () => {
+  it("maps chip selections and compares filter state", () => {
+    assert.deepEqual(Core.selectListFilter({ type: "all" }), {
+      favoritesOnly: false,
+      categoryFilter: "all",
+    });
+    assert.deepEqual(Core.selectListFilter({ type: "favorites" }), {
+      favoritesOnly: true,
+      categoryFilter: "all",
+    });
+    assert.deepEqual(Core.selectListFilter({ type: "category", category: "Dev" }), {
+      favoritesOnly: false,
+      categoryFilter: "Dev",
+    });
+    assert.equal(
+      Core.listFilterEquals(
+        Core.selectListFilter({ type: "favorites" }),
+        { favoritesOnly: true, categoryFilter: "all" }
+      ),
+      true
+    );
+    assert.equal(Core.listFilterSignature(Core.selectListFilter({ type: "all" })), "all");
+  });
+});
+
+describe("partitionCategoryChips", () => {
+  it("keeps at most N visible and puts the rest in overflow", () => {
+    const cats = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+    const parts = Core.partitionCategoryChips(cats, "", 3);
+    assert.deepEqual(parts.visible, ["Alpha", "Beta", "Gamma"]);
+    assert.deepEqual(parts.overflow, ["Delta", "Epsilon"]);
+  });
+
+  it("promotes the selected category into the visible set", () => {
+    const cats = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+    const parts = Core.partitionCategoryChips(cats, "Epsilon", 3);
+    assert.equal(parts.visible[0], "Epsilon");
+    assert.equal(parts.visible.length, 3);
+    assert.ok(!parts.overflow.includes("Epsilon"));
+    assert.ok(parts.visible.includes("Alpha"));
+    assert.ok(parts.visible.includes("Beta"));
+  });
+
+  it("handles empty / small lists", () => {
+    assert.deepEqual(Core.partitionCategoryChips([], "X", 3), { visible: [], overflow: [] });
+    assert.deepEqual(Core.partitionCategoryChips(["Only"], "", 3), {
+      visible: ["Only"],
+      overflow: [],
+    });
+  });
+});
+
 describe("previewText", () => {
   it("collapses whitespace and truncates", () => {
     assert.equal(Core.previewText("a\n\nb   c", 100), "a b c");

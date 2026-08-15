@@ -322,6 +322,53 @@ function uniqueCategories(prompts) {
 }
 
 /**
+ * Split categories into a short visible chip list and an overflow list for a ⋯ menu.
+ * Keeps the selected category among the visible chips when possible.
+ * @param {string[]} categories
+ * @param {string} selectedCategory - current category filter, or "" / "all"
+ * @param {number} maxVisible
+ * @returns {{ visible: string[], overflow: string[] }}
+ */
+function partitionCategoryChips(categories, selectedCategory, maxVisible) {
+  var max = Number(maxVisible);
+  if (!Number.isFinite(max) || max < 0) max = 3;
+  max = Math.floor(max);
+
+  var cats = Array.isArray(categories) ? categories.slice() : [];
+  var selected = asStr(selectedCategory).trim();
+  if (!selected || selected === "all") selected = "";
+
+  var visible = [];
+  var used = {};
+
+  if (selected) {
+    for (var i = 0; i < cats.length; i++) {
+      if (cats[i] === selected) {
+        visible.push(selected);
+        used[selected] = true;
+        break;
+      }
+    }
+  }
+
+  for (var j = 0; j < cats.length; j++) {
+    var c = cats[j];
+    if (used[c]) continue;
+    if (visible.length < max) {
+      visible.push(c);
+      used[c] = true;
+    }
+  }
+
+  var overflow = [];
+  for (var k = 0; k < cats.length; k++) {
+    if (!used[cats[k]]) overflow.push(cats[k]);
+  }
+
+  return { visible: visible, overflow: overflow };
+}
+
+/**
  * Resolve the configured startup filter.
  * @param {string} mode - "all" | "favorites" | "category"
  * @param {string} categoryName - used when mode === "category"
@@ -345,6 +392,39 @@ function resolveDefaultFilter(mode, categoryName, knownCategories) {
     return { favoritesOnly: false, categoryFilter: wanted };
   }
   return { favoritesOnly: false, categoryFilter: "all" };
+}
+
+/**
+ * Apply a list-filter chip selection.
+ * @param {{ type: string, category?: string }} selection
+ * @returns {{ favoritesOnly: boolean, categoryFilter: string }}
+ */
+function selectListFilter(selection) {
+  var sel = selection && typeof selection === "object" ? selection : {};
+  var type = asStr(sel.type).trim().toLowerCase();
+  if (type === "favorites" || type === "favourite" || type === "favourites") {
+    return { favoritesOnly: true, categoryFilter: "all" };
+  }
+  if (type === "category") {
+    var cat = asStr(sel.category).trim();
+    if (!cat) return { favoritesOnly: false, categoryFilter: "all" };
+    return { favoritesOnly: false, categoryFilter: cat };
+  }
+  return { favoritesOnly: false, categoryFilter: "all" };
+}
+
+function listFilterEquals(a, b) {
+  a = a || {};
+  b = b || {};
+  return !!a.favoritesOnly === !!b.favoritesOnly && asStr(a.categoryFilter) === asStr(b.categoryFilter);
+}
+
+function listFilterSignature(state) {
+  state = state || {};
+  if (state.favoritesOnly) return "favorites";
+  var cat = asStr(state.categoryFilter);
+  if (!cat || cat === "all") return "all";
+  return "category:" + cat;
 }
 
 function previewText(content, maxLen) {
@@ -383,7 +463,11 @@ var PvCore = {
   formatHotkeyCompact: formatHotkeyCompact,
   filterAndSortPrompts: filterAndSortPrompts,
   uniqueCategories: uniqueCategories,
+  partitionCategoryChips: partitionCategoryChips,
   resolveDefaultFilter: resolveDefaultFilter,
+  selectListFilter: selectListFilter,
+  listFilterEquals: listFilterEquals,
+  listFilterSignature: listFilterSignature,
   previewText: previewText,
 };
 

@@ -863,14 +863,25 @@ class PromptVaultDesklet extends Desklet.Desklet {
     searchRow.add(this._clearBtn, { expand: false });
     this._listPanel.add(searchRow, { x_fill: true });
 
-    this._filterScroll = new St.ScrollView({ style_class: "prompt-vault-filter-scroll" });
-    this._filterScroll.set_policy(St.PolicyType.AUTOMATIC, St.PolicyType.NEVER);
-    this._filterRow = new St.BoxLayout({ vertical: false, style_class: "prompt-vault-filters" });
-    this._filterScroll.add_actor(this._filterRow);
-    this._listPanel.add(this._filterScroll, { x_fill: true });
+    // Fixed chip strip: All · Favorites · up to 3 categories · ⋯ (overflow menu).
+    // No horizontal ScrollView — avoids hit-testing bugs with the list below.
+    this._filterRow = new St.BoxLayout({
+      vertical: false,
+      style_class: "prompt-vault-filters",
+      reactive: true,
+    });
+    this._filterCatsKey = "";
+    this._listPanel.add(this._filterRow, { x_fill: true, expand: false });
 
     this._scrollView = new St.ScrollView({ style_class: "prompt-vault-scroll" });
     this._scrollView.set_policy(St.PolicyType.NEVER, St.PolicyType.AUTOMATIC);
+    try {
+      // Prevent list content from receiving clicks outside its allocated box
+      // (common after scrolling — hits land on chips visually but miss them).
+      this._scrollView.clip_to_allocation = true;
+    } catch (e) {
+      /* older St */
+    }
     this._listBox = new St.BoxLayout({ vertical: true, style_class: "prompt-vault-list" });
     this._scrollView.add_actor(this._listBox);
     this._listPanel.add(this._scrollView, { expand: true, x_fill: true, y_fill: true });
@@ -1602,6 +1613,13 @@ class PromptVaultDesklet extends Desklet.Desklet {
     return PvCore.uniqueCategories(this._prompts);
   }
 
+  _currentListFilter() {
+    return {
+      favoritesOnly: !!this._favoritesOnly,
+      categoryFilter: this._categoryFilter || "all",
+    };
+  }
+
   _filteredPrompts() {
     return PvCore.filterAndSortPrompts(this._prompts, {
       favoritesOnly: this._favoritesOnly,
@@ -1611,55 +1629,193 @@ class PromptVaultDesklet extends Desklet.Desklet {
     });
   }
 
-  _renderFilters() {
+  /**
+   * Apply a chip selection. Uses press (not click) so parent actors cannot
+   * reinterpret a tiny move as a drag and swallow the gesture.
+   */
+  _setListFilter(selection) {
+    const next = PvCore.selectListFilter(selection);
+    const prev = this._currentListFilter();
+    if (PvCore.listFilterEquals(prev, next)) {
+      this._syncFilterChipActiveState();
+      return;
+    }
+    this._favoritesOnly = next.favoritesOnly;
+    this._categoryFilter = next.categoryFilter;
+    this._renderList();
+  }
+
+  _chipIsActive(selection) {
+    const cur = this._currentListFilter();
+    return PvCore.listFilterEquals(cur, PvCore.selectListFilter(selection));
+  }
+
+  _wireFilterChip(chip, selection) {
+    chip._pvFilterSelection = selection;
+    chip.connect("button-press-event", (_actor, event) => {
+      if (event.get_button() !== 1) return Clutter.EVENT_PROPAGATE;
+      this._setListFilter(selection);
+      return Clutter.EVENT_STOP;
+    });
+    chip.connect("clicked", () => {
+      this._setListFilter(selection);
+    });
+  }
+
+  _mkFilterChip(label, selection, extraClass) {
+    const isActive = selection ? this._chipIsActive(selection) : false;
+    const chip = new St.Button({
+      label,
+      can_focus: true,
+      reactive: true,
+      track_hover: true,
+      style_class:
+        "prompt-vault-chip" +
+        (isActive ? " prompt-vault-chip-active" : "") +
+        (extraClass ? " " + extraClass : ""),
+    });
+    this._a11y(chip, label);
+    try {
+      if (chip.label_actor && chip.label_actor.clutter_text) {
+        chip.label_actor.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+      }
+    } catch (e) {
+      /* ignore */
+    }
+    if (selection) this._wireFilterChip(chip, selection);
+    this._filterRow.add(chip, { expand: false, y_fill: false, y_align: St.Align.MIDDLE });
+    return chip;
+  }
+
+  _syncFilterChipActiveState() {
+    if (!this._filterRow) return;
+    const n = this._filterRow.get_n_children();
+    for (let i = 0; i < n; i++) {
+      const chip = this._filterRow.get_child_at_index(i);
+      if (!chip) continue;
+      if (chip._pvFilterMore) {
+        const active = !!chip._pvFilterMoreActive;
+        if (active) chip.add_style_class_name("prompt-vault-chip-active");
+        else chip.remove_style_class_name("prompt-vault-chip-active");
+        continue;
+      }
+      if (!chip._pvFilterSelection) continue;
+      const active = this._chipIsActive(chip._pvFilterSelection);
+      if (active) chip.add_style_class_name("prompt-vault-chip-active");
+      else chip.remove_style_class_name("prompt-vault-chip-active");
+    }
+  }
+
+  _openCategoryOverflowMenu(sourceBtn, overflowCategories) {
+    try {
+      this._closeRowMenu();
+      const menu = new PopupMenu.PopupMenu(sourceBtn, St.Side.TOP);
+      menu.actor.add_style_class_name("prompt-vault-row-menu");
+      try {
+        Main.uiGroup.add_child(menu.actor);
+      } catch (e) {
+        Main.uiGroup.add_actor(menu.actor);
+      }
+      menu.actor.hide();
+      this._ensureRowMenuManager().addMenu(menu);
+
+      const selected = !this._favoritesOnly ? this._categoryFilter : "";
+      for (const cat of overflowCategories) {
+        const item = new PopupMenu.PopupMenuItem(cat);
+        if (cat === selected) {
+          try {
+            item.setOrnament(PopupMenu.OrnamentType.DOT, true);
+          } catch (e) {
+            /* older PopupMenu */
+          }
+        }
+        item.connect("activate", () => {
+          try {
+            menu.close(true);
+          } catch (e) {
+            /* ignore */
+          }
+          this._setListFilter({ type: "category", category: cat });
+        });
+        menu.addMenuItem(item);
+      }
+
+      menu.connect("open-state-changed", (_m, isOpen) => {
+        if (!isOpen) {
+          this._addTimeout(0, () => {
+            this._closeRowMenu();
+            return GLib.SOURCE_REMOVE;
+          });
+        }
+      });
+
+      this._rowMenu = menu;
+      menu.open(true);
+    } catch (e) {
+      global.logError(`[Prompt Vault] Category menu failed: ${e}`);
+      this._setStatus(_("Could not open the category menu."), true);
+    }
+  }
+
+  _rebuildFilterChips() {
+    if (!this._filterRow) return;
     this._filterRow.destroy_all_children();
 
-    const mkChip = (label, isActive, onClick, extraClass) => {
-      const chip = new St.Button({
-        label,
-        can_focus: true,
-        style_class:
-          "prompt-vault-chip" +
-          (isActive ? " prompt-vault-chip-active" : "") +
-          (extraClass ? " " + extraClass : ""),
-      });
-      this._a11y(chip, label);
-      try {
-        // Keep full category names; the filter row scrolls horizontally.
-        if (chip.label_actor && chip.label_actor.clutter_text) {
-          chip.label_actor.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
-        }
-      } catch (e) {
-        /* ignore */
-      }
-      chip.connect("clicked", () => onClick());
-      this._filterRow.add(chip, { expand: false });
-    };
-
-    mkChip(_("All"), this._categoryFilter === "all" && !this._favoritesOnly, () => {
-      this._categoryFilter = "all";
-      this._favoritesOnly = false;
-      this._renderList();
-    });
+    this._mkFilterChip(_("All"), { type: "all" });
 
     const favCount = this._prompts.filter((p) => p.favorite).length;
-    mkChip(
+    this._mkFilterChip(
       "★ " + _("Favorites") + (favCount ? " (" + favCount + ")" : ""),
-      this._favoritesOnly,
-      () => {
-        this._favoritesOnly = true;
-        this._categoryFilter = "all";
-        this._renderList();
-      },
+      { type: "favorites" },
       "prompt-vault-chip-fav"
     );
 
-    for (const cat of this._getCategories()) {
-      mkChip(cat, !this._favoritesOnly && this._categoryFilter === cat, () => {
-        this._categoryFilter = cat;
-        this._favoritesOnly = false;
-        this._renderList();
+    const cats = this._getCategories();
+    const selectedCat =
+      !this._favoritesOnly && this._categoryFilter && this._categoryFilter !== "all"
+        ? this._categoryFilter
+        : "";
+    const parts = PvCore.partitionCategoryChips(cats, selectedCat, 3);
+
+    for (const cat of parts.visible) {
+      this._mkFilterChip(cat, { type: "category", category: cat });
+    }
+
+    if (parts.overflow.length) {
+      const moreActive = !!(selectedCat && parts.overflow.indexOf(selectedCat) >= 0);
+      const moreBtn = this._mkFilterChip("⋯", null, "prompt-vault-chip-more");
+      moreBtn._pvFilterMore = true;
+      moreBtn._pvFilterMoreActive = moreActive;
+      if (moreActive) moreBtn.add_style_class_name("prompt-vault-chip-active");
+      this._a11y(moreBtn, _("More categories"));
+      new Tooltips.Tooltip(moreBtn, _("More categories"));
+      const openMore = () => this._openCategoryOverflowMenu(moreBtn, parts.overflow);
+      moreBtn.connect("button-press-event", (_a, event) => {
+        if (event.get_button() !== 1) return Clutter.EVENT_PROPAGATE;
+        openMore();
+        return Clutter.EVENT_STOP;
       });
+      moreBtn.connect("clicked", openMore);
+    }
+  }
+
+  _renderFilters() {
+    if (!this._filterRow) return;
+    const cats = this._getCategories();
+    const favCount = this._prompts.filter((p) => p.favorite).length;
+    const key =
+      cats.join("\0") +
+      "|" +
+      favCount +
+      "|" +
+      PvCore.listFilterSignature(this._currentListFilter());
+    // Rebuild when categories or the active filter change (selected overflow
+    // category must be promoted into the visible chip slots).
+    if (key !== this._filterCatsKey || this._filterRow.get_n_children() === 0) {
+      this._filterCatsKey = key;
+      this._rebuildFilterChips();
+    } else {
+      this._syncFilterChipActiveState();
     }
   }
 
@@ -1728,23 +1884,49 @@ class PromptVaultDesklet extends Desklet.Desklet {
       track_hover: true,
     });
 
-    const title = new St.Label({ text: prompt.title, style_class: "prompt-vault-row-title" });
+    // Labels must stay non-reactive so presses hit `body` (not ClutterText).
+    // The list ScrollView steals button-release on tiny moves — copy on press.
+    const passthroughLabel = (label) => {
+      try {
+        label.reactive = false;
+      } catch (e) {
+        /* older St */
+      }
+      try {
+        if (label.clutter_text) label.clutter_text.reactive = false;
+      } catch (e2) {
+        /* ignore */
+      }
+      return label;
+    };
+
+    const title = passthroughLabel(
+      new St.Label({ text: prompt.title, style_class: "prompt-vault-row-title" })
+    );
     title.clutter_text.ellipsize = Pango.EllipsizeMode.END;
     body.add(title, { x_fill: true, expand: false });
 
     if (prompt.hotkeySlot) {
       const combo = _formatHotkeyBadge(prompt.hotkeySlot);
-      const shortcut = new St.Label({
-        text: combo,
-        style_class: "prompt-vault-row-shortcut",
-      });
+      const shortcut = passthroughLabel(
+        new St.Label({
+          text: combo,
+          style_class: "prompt-vault-row-shortcut",
+        })
+      );
       shortcut.clutter_text.ellipsize = Pango.EllipsizeMode.END;
       new Tooltips.Tooltip(shortcut, _("Paste via") + " " + combo);
       body.add(shortcut, { x_fill: true, expand: false });
     }
 
-    const chips = new St.BoxLayout({ vertical: false, style_class: "prompt-vault-row-chips" });
-    const cat = new St.Label({ text: prompt.category, style_class: "prompt-vault-category" });
+    const chips = new St.BoxLayout({
+      vertical: false,
+      reactive: false,
+      style_class: "prompt-vault-row-chips",
+    });
+    const cat = passthroughLabel(
+      new St.Label({ text: prompt.category, style_class: "prompt-vault-category" })
+    );
     cat.clutter_text.ellipsize = Pango.EllipsizeMode.END;
     chips.add(cat, { expand: false, y_align: St.Align.MIDDLE, y_fill: false });
 
@@ -1752,29 +1934,35 @@ class PromptVaultDesklet extends Desklet.Desklet {
       const maxTags = 3;
       const shown = prompt.tags.slice(0, maxTags);
       for (const tag of shown) {
-        const chip = new St.Label({
-          text: "#" + tag,
-          style_class: "prompt-vault-tag-chip",
-        });
+        const chip = passthroughLabel(
+          new St.Label({
+            text: "#" + tag,
+            style_class: "prompt-vault-tag-chip",
+          })
+        );
         chip.clutter_text.ellipsize = Pango.EllipsizeMode.END;
         chips.add(chip, { expand: false, y_align: St.Align.MIDDLE, y_fill: false });
       }
       if (prompt.tags.length > maxTags) {
         chips.add(
-          new St.Label({
-            text: "+" + (prompt.tags.length - maxTags),
-            style_class: "prompt-vault-tag-chip",
-          }),
+          passthroughLabel(
+            new St.Label({
+              text: "+" + (prompt.tags.length - maxTags),
+              style_class: "prompt-vault-tag-chip",
+            })
+          ),
           { expand: false, y_align: St.Align.MIDDLE, y_fill: false }
         );
       }
     }
 
     if (this.show_usage && prompt.useCount) {
-      const usage = new St.Label({
-        text: `${prompt.useCount}×`,
-        style_class: "prompt-vault-row-usage",
-      });
+      const usage = passthroughLabel(
+        new St.Label({
+          text: `${prompt.useCount}×`,
+          style_class: "prompt-vault-row-usage",
+        })
+      );
       chips.add(usage, { expand: false, y_align: St.Align.MIDDLE, y_fill: false });
       row._pvUsageLabel = usage;
     }
@@ -1782,17 +1970,16 @@ class PromptVaultDesklet extends Desklet.Desklet {
 
     this._a11y(body, _("Copy") + ": " + prompt.title);
     new Tooltips.Tooltip(body, _("Click to copy to clipboard"));
-    body.connect("button-release-event", (_a, event) => {
-      if (event.get_button() === 1) {
-        this._copyPrompt(prompt, row);
-        return Clutter.EVENT_STOP;
-      }
-      return Clutter.EVENT_PROPAGATE;
+    const doCopy = () => this._copyPrompt(prompt, row);
+    body.connect("button-press-event", (_a, event) => {
+      if (event.get_button() !== 1) return Clutter.EVENT_PROPAGATE;
+      doCopy();
+      return Clutter.EVENT_STOP;
     });
     body.connect("key-press-event", (_a, event) => {
       const sym = event.get_key_symbol();
       if (sym === Clutter.KEY_Return || sym === Clutter.KEY_KP_Enter || sym === Clutter.KEY_space) {
-        this._copyPrompt(prompt, row);
+        doCopy();
         return Clutter.EVENT_STOP;
       }
       return Clutter.EVENT_PROPAGATE;
