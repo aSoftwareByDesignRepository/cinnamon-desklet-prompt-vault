@@ -192,8 +192,13 @@ class PromptEditDialog {
     this._existing = existing || null;
     // Dialog width follows desklet width but stays in a readable range.
     // Content viewport is NOT tied to list_height (that caused a huge empty textarea).
+    const seedCtx = PvCore.dialogLayoutContext(1920, 1080, {
+      panelWidth: Number(desklet.panel_width) || 0,
+    });
     const seed = PvCore.dialogContentMetrics(0, {
-      dialogWidth: Number(desklet.panel_width) || PvCore.DIALOG_CONTENT.minDialogWidth,
+      dialogWidth: seedCtx.dialogWidth,
+      maxViewport: seedCtx.maxViewport,
+      isEmpty: true,
     });
     this._innerW = seed.innerWidth;
     this._viewportH = seed.viewportHeight;
@@ -309,16 +314,28 @@ class PromptEditDialog {
       clip_to_allocation: true,
     });
     this._scroll.set_policy(St.PolicyType.NEVER, St.PolicyType.AUTOMATIC);
-    this._scroll.style = `height: ${this._viewportH}px; max-height: ${this._viewportH}px;`;
+    this._scroll.style =
+      `height: ${this._viewportH}px; max-height: ${this._viewportH}px; min-height: ${this._viewportH}px;`;
     this._scrollInner = new St.BoxLayout({ vertical: true });
     this._scroll.add_actor(this._scrollInner);
-    layout.add(this._scroll, { x_fill: true });
+    this._scroll.connect("scroll-event", (_a, event) => this._onContentScroll(event));
+    layout.add(this._scroll, { x_fill: true, expand: true });
+
+    // Scroll hint — visible when content is taller than the viewport.
+    this._scrollHint = new St.Label({
+      text: "",
+      style_class: "prompt-vault-scroll-hint",
+    });
+    this._scrollHint.hide();
+    layout.add(this._scrollHint, { x_fill: true });
 
     this._contentEntry = new St.Entry({
       style_class: "prompt-vault-input prompt-vault-textarea",
       can_focus: true,
-      hint_text: _("Type your prompt here"),
-      clip_to_allocation: true,
+      hint_text: _("Type your prompt here — scroll to see all of it"),
+      // Do NOT clip the entry: clipping hides overflow text and makes long
+      // prompts look truncated even when the ScrollView could scroll them.
+      clip_to_allocation: false,
     });
     _configureMultilineEntry(this._contentEntry);
     try {
@@ -331,6 +348,12 @@ class PromptEditDialog {
       this._charCount.set_text(`${this._contentEntry.get_text().length} ${_("chars")}`);
       this._syncContentLayout();
     });
+    // St.Entry eats wheel events while focused — forward them to the ScrollView
+    // so long prompts stay reachable with the mouse wheel / touchpad.
+    this._contentEntry.connect("scroll-event", (_a, event) => this._onContentScroll(event));
+    this._contentEntry.clutter_text.connect("scroll-event", (_a, event) =>
+      this._onContentScroll(event)
+    );
 
     this._errorLabel = new St.Label({ text: "", style_class: "prompt-vault-panel-error" });
     this._errorLabel.clutter_text.line_wrap = true;
@@ -410,30 +433,152 @@ class PromptEditDialog {
     }
   }
 
+  _onContentScroll(event) {
+    if (!this._scroll) return Clutter.EVENT_PROPAGATE;
+    try {
+      const adj = this._scroll.vscroll.adjustment;
+      let direction = "";
+      let smoothDy = 0;
+      const dir = event.get_scroll_direction();
+      if (dir === Clutter.ScrollDirection.UP) direction = "up";
+      else if (dir === Clutter.ScrollDirection.DOWN) direction = "down";
+      else if (dir === Clutter.ScrollDirection.SMOOTH) {
+        direction = "smooth";
+        const deltas = event.get_scroll_delta();
+        smoothDy = deltas[1];
+      } else {
+        return Clutter.EVENT_PROPAGATE;
+      }
+      const delta = PvCore.dialogScrollDelta(direction, adj.step_increment, smoothDy);
+      if (!delta) return Clutter.EVENT_PROPAGATE;
+      adj.value = PvCore.clampScrollValue(
+        adj.value + delta,
+        adj.lower,
+        adj.upper,
+        adj.page_size
+      );
+      return Clutter.EVENT_STOP;
+    } catch (e) {
+      return Clutter.EVENT_PROPAGATE;
+    }
+  }
+
+  _dialogLayoutOpts() {
+    let screenW = 1920;
+    let screenH = 1080;
+    try {
+      const mon = Main.layoutManager.primaryMonitor;
+      screenW = mon.width;
+      screenH = mon.height;
+    } catch (e) {
+      /* ignore */
+    }
+    const ctx = PvCore.dialogLayoutContext(screenW, screenH, {
+      panelWidth: Number(this._desklet.panel_width) || 0,
+    });
+    this._innerW = ctx.dialogWidth;
+    try {
+      this._dialog.contentLayout.style = `width: ${this._innerW + 48}px;`;
+    } catch (e2) {
+      /* ignore */
+    }
+    return ctx;
+  }
+
+  _finalizeScrollAdjustment(m) {
+    if (!this._scroll || !this._scroll.vscroll) return;
+    try {
+      const adj = this._scroll.vscroll.adjustment;
+      adj.step_increment = 24;
+      adj.page_size = m.viewportHeight;
+      const maxVal = Math.max(0, m.entryHeight - m.viewportHeight);
+      if (adj.value > maxVal) adj.value = maxVal;
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
   _syncContentLayout() {
     if (!this._scrollInner || !this._contentEntry) return;
     const ct = this._contentEntry.clutter_text;
+    const text = this._contentEntry.get_text() || "";
     try {
-      // line_wrap_width is the ONLY ClutterText API that wants Pango units.
-      // Actor set_size / preferred height use pixels — never multiply those by Pango.SCALE.
-      const probe = PvCore.dialogContentMetrics(0, { dialogWidth: this._innerW });
+      const ctx = this._dialogLayoutOpts();
+      const probe = PvCore.dialogContentMetrics(0, {
+        dialogWidth: this._innerW,
+        maxViewport: ctx.maxViewport,
+        minViewport: ctx.minViewport,
+      });
+      // Measure unconstrained preferred height. Fixed ClutterText heights poison
+      // get_preferred_height and make long prompts look truncated.
+      try {
+        ct.set_height(-1);
+      } catch (e0) {
+        /* ignore */
+      }
+      try {
+        this._contentEntry.set_height(-1);
+      } catch (e1) {
+        /* ignore */
+      }
+      try {
+        this._scrollInner.set_height(-1);
+      } catch (e1b) {
+        /* ignore */
+      }
       ct.set_line_wrap(true);
+      // line_wrap_width is the ONLY ClutterText API that wants Pango units.
       ct.set_line_wrap_width(probe.textWidth * Pango.SCALE);
-      const [, prefH] = ct.get_preferred_height(probe.textWidth);
-      const m = PvCore.dialogContentMetrics(prefH, { dialogWidth: this._innerW });
+      let prefH = 0;
+      try {
+        const [, h] = ct.get_preferred_height(probe.textWidth);
+        prefH = h;
+      } catch (e2) {
+        /* ignore */
+      }
+      const m = PvCore.dialogContentMetrics(prefH, {
+        dialogWidth: this._innerW,
+        maxViewport: ctx.maxViewport,
+        minViewport: ctx.minViewport,
+        text: text,
+        isEmpty: text.length === 0,
+      });
       this._viewportH = m.viewportHeight;
       this._scroll.style =
         `height: ${m.viewportHeight}px; max-height: ${m.viewportHeight}px; min-height: ${m.viewportHeight}px;`;
       this._scrollInner.style =
-        `width: ${m.innerWidth}px; min-width: ${m.innerWidth}px; min-height: ${m.entryHeight}px;`;
+        `width: ${m.innerWidth}px; min-width: ${m.innerWidth}px; min-height: ${m.entryHeight}px; height: ${m.entryHeight}px;`;
+      // Grow the Entry to the full text height so nothing is clipped; the
+      // ScrollView viewport stays capped and scrolls when needsScroll is true.
       this._contentEntry.set_height(m.entryHeight);
+      // NEVER set ct.set_height — that breaks subsequent preferred-height reads.
+      if (this._scrollHint) {
+        if (m.needsScroll) {
+          const chars = text.length;
+          this._scrollHint.set_text(
+            _("Scroll inside the box to see the full prompt") +
+              ` · ${chars} ${_("chars")}`
+          );
+          this._scrollHint.show();
+        } else {
+          this._scrollHint.set_text("");
+          this._scrollHint.hide();
+        }
+      }
       try {
-        ct.set_height(m.entryHeight);
-      } catch (e2) {
-        /* older Clutter */
+        this._scroll.set_policy(
+          St.PolicyType.NEVER,
+          m.needsScroll ? St.PolicyType.ALWAYS : St.PolicyType.NEVER
+        );
+      } catch (e3) {
+        /* ignore */
       }
       this._scrollInner.queue_relayout();
       this._scroll.queue_relayout();
+      Mainloop.timeout_add(50, () => {
+        this._finalizeScrollAdjustment(m);
+        return GLib.SOURCE_REMOVE;
+      });
     } catch (e) {
       /* ignore */
     }

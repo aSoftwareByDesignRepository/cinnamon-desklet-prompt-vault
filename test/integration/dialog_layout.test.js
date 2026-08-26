@@ -30,15 +30,15 @@ describe("edit dialog + copy integration", () => {
     const long = "x".repeat(5000);
     const p = Core.sanitizePrompt({ title: "Zeus", content: long }, deps);
     assert.equal(p.content.length, 5000);
-    const m = Core.dialogContentMetrics(900, { dialogWidth: 560 });
+    const m = Core.dialogContentMetrics(900, { dialogWidth: 560, text: long });
     assert.equal(m.viewportHeight, Core.DIALOG_CONTENT.maxViewport);
     assert.ok(m.entryHeight > m.viewportHeight);
   });
 
   it("dialog width clamp is independent of panel list height extremes", () => {
     // list_height is irrelevant — only dialogWidth matters
-    const a = Core.dialogContentMetrics(0, { dialogWidth: 260 });
-    const b = Core.dialogContentMetrics(0, { dialogWidth: 640 });
+    const a = Core.dialogContentMetrics(0, { dialogWidth: 260, isEmpty: true });
+    const b = Core.dialogContentMetrics(0, { dialogWidth: 640, isEmpty: true });
     assert.equal(a.viewportHeight, b.viewportHeight);
     assert.ok(a.innerWidth < b.innerWidth);
   });

@@ -42,15 +42,18 @@ var PANEL = {
 
 /** Edit-dialog content area — independent of desklet list height. */
 var DIALOG_CONTENT = {
-  minViewport: 140,
-  maxViewport: 220,
+  minViewport: 200,
+  /** Fallback cap when screen height is unknown; real dialogs use dialogViewportBudget(). */
+  maxViewport: 520,
   minEntry: 120,
-  pad: 20,
+  pad: 24,
   /** Horizontal chrome inside the scroll (padding + border). */
   textChromeX: 34,
   minTextWidth: 180,
   minDialogWidth: 420,
-  maxDialogWidth: 560,
+  maxDialogWidth: 680,
+  /** Fixed dialog chrome below the scroll (meta fields, slots, buttons, margins). */
+  dialogChromeHeight: 380,
 };
 
 var TEMPLATE_RE = /\{\{\s*([^{}]+?)\s*\}\}/g;
@@ -253,16 +256,92 @@ function titleWrapWidth(panelWidth) {
 }
 
 /**
+ * Rough text block height when ClutterText.get_preferred_height under-reports
+ * (common for 10k+ char prompts in Cinnamon St.Entry).
+ *
+ * @param {string} text
+ * @param {number} textWidthPx
+ * @param {object} [opts]
+ * @returns {number}
+ */
+function estimateTextHeight(text, textWidthPx, opts) {
+  opts = opts || {};
+  var lineHeight = Number(opts.lineHeight);
+  if (!Number.isFinite(lineHeight) || lineHeight <= 0) lineHeight = 20;
+  var avgCharPx = Number(opts.avgCharPx);
+  if (!Number.isFinite(avgCharPx) || avgCharPx <= 0) avgCharPx = 7.2;
+  text = asStr(text);
+  if (!text) return 0;
+  var width = Number(textWidthPx);
+  if (!Number.isFinite(width) || width <= 0) width = 400;
+  var charsPerLine = Math.max(16, Math.floor(width / avgCharPx));
+  var lines = text.split("\n");
+  var totalLines = 0;
+  for (var i = 0; i < lines.length; i++) {
+    var len = lines[i].length;
+    totalLines += Math.max(1, Math.ceil(len / charsPerLine));
+  }
+  return totalLines * lineHeight;
+}
+
+/**
+ * Viewport height budget from monitor height (meta fields + buttons eat the rest).
+ * @param {number} screenHeightPx
+ * @param {object} [opts]
+ * @returns {number}
+ */
+function dialogViewportBudget(screenHeightPx, opts) {
+  opts = opts || {};
+  var minView = Number(opts.minViewport);
+  if (!Number.isFinite(minView)) minView = DIALOG_CONTENT.minViewport;
+  var absMax = Number(opts.absMaxViewport);
+  if (!Number.isFinite(absMax)) absMax = DIALOG_CONTENT.maxViewport;
+  var chrome = Number(opts.chromeHeight);
+  if (!Number.isFinite(chrome)) chrome = DIALOG_CONTENT.dialogChromeHeight;
+  var h = Number(screenHeightPx);
+  if (!Number.isFinite(h) || h <= 0) h = 900;
+  var budget = Math.floor(h - chrome);
+  return Math.max(minView, Math.min(absMax, budget));
+}
+
+/**
+ * Dialog width + viewport budget from screen / desklet panel width.
+ * @param {number} screenWidthPx
+ * @param {number} screenHeightPx
+ * @param {object} [opts]
+ * @returns {{ dialogWidth: number, maxViewport: number, minViewport: number }}
+ */
+function dialogLayoutContext(screenWidthPx, screenHeightPx, opts) {
+  opts = opts || {};
+  var panelW = Number(opts.panelWidth);
+  var screenW = Number(screenWidthPx);
+  if (!Number.isFinite(screenW) || screenW <= 0) screenW = 1920;
+  var fromPanel = Number.isFinite(panelW) && panelW > 0 ? panelW : 0;
+  var fromScreen = Math.floor(screenW * 0.42);
+  var targetW = Math.max(fromPanel, fromScreen, DIALOG_CONTENT.minDialogWidth);
+  var dialogWidth = Math.max(
+    DIALOG_CONTENT.minDialogWidth,
+    Math.min(DIALOG_CONTENT.maxDialogWidth, Math.floor(targetW))
+  );
+  return {
+    dialogWidth: dialogWidth,
+    maxViewport: dialogViewportBudget(screenHeightPx, opts),
+    minViewport: DIALOG_CONTENT.minViewport,
+  };
+}
+
+/**
  * Dialog content textarea metrics.
- * Shrink-wraps short prompts; caps the viewport so empty/new prompts never open
- * as a huge empty cavern. Entry may grow beyond the viewport (scroll handles it).
+ * Empty/new prompts get a tall editor (max viewport). Short prompts shrink-wrap.
+ * Long prompts grow the entry to full text height; only the viewport caps so
+ * ScrollView scrolls — never clip entryHeight to the viewport.
  *
  * CRITICAL: never couple this to desklet list_height, and never feed Pango.SCALE
  * into ClutterActor.set_size (pixels only).
  *
  * @param {number} preferredTextHeightPx - from ClutterText.get_preferred_height
  * @param {object} [opts]
- * @returns {{ viewportHeight: number, entryHeight: number, textWidth: number, innerWidth: number }}
+ * @returns {{ viewportHeight: number, entryHeight: number, textWidth: number, innerWidth: number, needsScroll: boolean }}
  */
 function dialogContentMetrics(preferredTextHeightPx, opts) {
   opts = opts || {};
@@ -288,20 +367,83 @@ function dialogContentMetrics(preferredTextHeightPx, opts) {
   );
   var textWidth = Math.max(DIALOG_CONTENT.minTextWidth, innerWidth - DIALOG_CONTENT.textChromeX);
 
+  var text = asStr(opts.text);
+  var isEmpty = opts.isEmpty === true || text.length === 0;
+
+  if (isEmpty) {
+    var emptyEntry = Math.max(minEntry, maxView - 8);
+    return {
+      viewportHeight: maxView,
+      entryHeight: emptyEntry,
+      textWidth: textWidth,
+      innerWidth: innerWidth,
+      needsScroll: false,
+    };
+  }
+
   var pref = Number(preferredTextHeightPx);
   if (!Number.isFinite(pref) || pref < 0) pref = 0;
   pref = Math.floor(pref);
+  var estimated = estimateTextHeight(text, textWidth, opts);
+  var contentH = Math.max(pref, estimated);
 
-  var entryHeight = Math.max(minEntry, pref + pad);
-  // Viewport follows content up to max — never forces empty space to list_height.
+  // Entry ALWAYS fits the full text. Never clamp to viewport (that clips content).
+  var entryHeight = Math.max(minEntry, contentH + pad);
   var viewportHeight = Math.max(minView, Math.min(maxView, entryHeight));
+  var needsScroll = entryHeight > viewportHeight + 1;
 
   return {
     viewportHeight: viewportHeight,
     entryHeight: entryHeight,
     textWidth: textWidth,
     innerWidth: innerWidth,
+    needsScroll: needsScroll,
   };
+}
+
+/**
+ * Pixel delta for forwarding wheel/touchpad scroll onto a ScrollView adjustment.
+ * Pure helper so Clutter scroll-event wiring stays testable.
+ *
+ * @param {string} direction - "up"|"down"|"smooth"|"left"|"right"|other
+ * @param {number} stepIncrement - adjustment.step_increment
+ * @param {number} [smoothDy=0] - dy from SMOOTH scroll events
+ * @returns {number} delta to add to adjustment.value (0 = ignore)
+ */
+function dialogScrollDelta(direction, stepIncrement, smoothDy) {
+  var step = Number(stepIncrement);
+  if (!Number.isFinite(step) || step <= 0) step = 40;
+  var dir = asStr(direction).toLowerCase();
+  if (dir === "up") return -step * 3;
+  if (dir === "down") return step * 3;
+  if (dir === "smooth") {
+    var dy = Number(smoothDy);
+    if (!Number.isFinite(dy) || dy === 0) return 0;
+    return dy * step;
+  }
+  return 0;
+}
+
+/**
+ * Clamp a scroll adjustment value into a valid range.
+ * @param {number} value
+ * @param {number} lower
+ * @param {number} upper
+ * @param {number} pageSize
+ */
+function clampScrollValue(value, lower, upper, pageSize) {
+  var v = Number(value);
+  var lo = Number(lower);
+  var up = Number(upper);
+  var page = Number(pageSize);
+  if (!Number.isFinite(v)) v = 0;
+  if (!Number.isFinite(lo)) lo = 0;
+  if (!Number.isFinite(up)) up = 0;
+  if (!Number.isFinite(page) || page < 0) page = 0;
+  var max = Math.max(lo, up - page);
+  if (v < lo) return lo;
+  if (v > max) return max;
+  return v;
 }
 
 /**
@@ -668,7 +810,12 @@ var PvCore = {
   clampListHeight: clampListHeight,
   innerContentWidth: innerContentWidth,
   titleWrapWidth: titleWrapWidth,
+  estimateTextHeight: estimateTextHeight,
+  dialogViewportBudget: dialogViewportBudget,
+  dialogLayoutContext: dialogLayoutContext,
   dialogContentMetrics: dialogContentMetrics,
+  dialogScrollDelta: dialogScrollDelta,
+  clampScrollValue: clampScrollValue,
   toolbarLayoutMode: toolbarLayoutMode,
   toolbarButtons: toolbarButtons,
   toolbarRowsForMode: toolbarRowsForMode,

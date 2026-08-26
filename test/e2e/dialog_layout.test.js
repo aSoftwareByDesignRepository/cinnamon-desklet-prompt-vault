@@ -3,7 +3,7 @@
 /**
  * E2E model of the edit-dialog content sync.
  * Proves the old list_height + Pango.SCALE path cannot return, and the new
- * shrink-wrap path never opens a cavernous empty textarea.
+ * path uses screen budget for empty prompts while scrolling long ones.
  */
 
 const { describe, it } = require("node:test");
@@ -27,8 +27,11 @@ function legacySync(preferredTextPx, listHeight) {
   };
 }
 
-function modernSync(preferredTextPx, panelWidth) {
-  return Core.dialogContentMetrics(preferredTextPx, { dialogWidth: panelWidth });
+function modernSync(preferredTextPx, panelWidth, text) {
+  const opts = { dialogWidth: panelWidth };
+  if (text !== undefined) opts.text = text;
+  if (!text || text.length === 0) opts.isEmpty = true;
+  return Core.dialogContentMetrics(preferredTextPx, opts);
 }
 
 describe("e2e: edit dialog content layout", () => {
@@ -39,29 +42,33 @@ describe("e2e: edit dialog content layout", () => {
     assert.ok(bad.actorHeightIfScaled > 200000, "Pango.SCALE misuse inflates actors");
   });
 
-  it("modern path keeps empty/new prompts compact", () => {
+  it("modern path gives empty/new prompts a tall editor (screen budget)", () => {
     const good = modernSync(0, 400);
-    assert.equal(good.viewportHeight, Core.DIALOG_CONTENT.minViewport);
-    assert.ok(good.viewportHeight < 250);
-    assert.ok(good.entryHeight <= 140);
+    assert.equal(good.viewportHeight, Core.DIALOG_CONTENT.maxViewport);
+    assert.ok(good.viewportHeight >= Core.DIALOG_CONTENT.minViewport);
+    assert.ok(good.entryHeight >= Core.DIALOG_CONTENT.minEntry);
+    assert.equal(good.needsScroll, false);
   });
 
   it("survives rapid typing reflows without jumping to list_height", () => {
     let last = modernSync(0, 400);
     for (let lines = 1; lines <= 40; lines++) {
-      // ~18px per line preferred height simulation
-      const next = modernSync(lines * 18, 400);
+      const text = Array.from({ length: lines }, () => "line").join("\n");
+      const next = modernSync(lines * 18, 400, text);
       assert.ok(next.viewportHeight <= Core.DIALOG_CONTENT.maxViewport);
-      assert.ok(next.viewportHeight >= last.viewportHeight || next.viewportHeight === Core.DIALOG_CONTENT.maxViewport);
-      if (lines * 18 + Core.DIALOG_CONTENT.pad > Core.DIALOG_CONTENT.maxViewport) {
+      assert.ok(next.viewportHeight >= Core.DIALOG_CONTENT.minViewport);
+      assert.ok(next.innerWidth === last.innerWidth);
+      if (next.entryHeight > Core.DIALOG_CONTENT.maxViewport + 1) {
         assert.ok(next.entryHeight > next.viewportHeight);
+        assert.equal(next.needsScroll, true);
       }
       last = next;
     }
   });
 
   it("edit existing long prompt: viewport capped, entry scrolls", () => {
-    const m = modernSync(1200, 520);
+    const longText = "x".repeat(8000);
+    const m = modernSync(200, 520, longText);
     assert.equal(m.viewportHeight, Core.DIALOG_CONTENT.maxViewport);
     assert.ok(m.entryHeight > m.viewportHeight);
     assert.ok(m.entryHeight < 10000, "no Pango-scaled height leak");
@@ -71,8 +78,8 @@ describe("e2e: edit dialog content layout", () => {
     const widths = [260, 400, 640];
     for (const w of widths) {
       const empty = modernSync(0, w);
-      const typed = modernSync(90, w);
-      const saved = modernSync(90, w);
+      const typed = modernSync(90, w, "One line prompt");
+      const saved = modernSync(90, w, "One line prompt");
       assert.equal(empty.innerWidth, typed.innerWidth);
       assert.equal(typed.viewportHeight, saved.viewportHeight);
       assert.ok(empty.innerWidth <= Core.DIALOG_CONTENT.maxDialogWidth);

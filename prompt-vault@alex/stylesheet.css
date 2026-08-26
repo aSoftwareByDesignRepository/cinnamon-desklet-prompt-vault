@@ -594,6 +594,12 @@
 }
 
 .prompt-vault-edit-dialog .prompt-vault-textarea {
-  /* Natural height comes from dialogContentMetrics — do not inflate via CSS. */
-  min-height: 120px;
+  /* Height is driven by dialogContentMetrics in JS — avoid fighting it in CSS. */
+  min-height: 0;
+}
+
+.prompt-vault-scroll-hint {
+  font-size: 0.78em;
+  color: #9cc0ff;
+  padding: 2px 2px 0 2px;
 }
