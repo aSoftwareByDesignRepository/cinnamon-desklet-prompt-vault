@@ -157,11 +157,123 @@ describe("layout metrics (responsive chrome)", () => {
     assert.equal(Core.asStr(42), "42");
   });
 
-  it("picks toolbar packing by width breakpoints", () => {
+  it("picks toolbar packing by width breakpoints (readable labels)", () => {
     assert.equal(Core.toolbarLayoutMode(260), "stack");
+    assert.equal(Core.toolbarLayoutMode(299), "stack");
     assert.equal(Core.toolbarLayoutMode(300), "two-row");
     assert.equal(Core.toolbarLayoutMode(519), "two-row");
     assert.equal(Core.toolbarLayoutMode(520), "one-row");
+    assert.equal(Core.toolbarLayoutMode(640), "one-row");
+    assert.equal(Core.toolbarLayoutMode("bad"), "two-row");
+  });
+
+  it("packs rows so every label stays readable (no 4-across crush)", () => {
+    const one = Core.toolbarRowsForMode("one-row");
+    assert.equal(one.length, 1);
+    assert.deepEqual(
+      one[0].buttons.map((b) => b.id),
+      ["add", "shortcuts", "export", "import", "folder"]
+    );
+    assert.ok(one[0].buttons.length <= Core.toolbarMaxButtonsPerRow("one-row"));
+
+    const two = Core.toolbarRowsForMode("two-row");
+    assert.equal(two.length, 2);
+    assert.deepEqual(
+      two[0].buttons.map((b) => b.id),
+      ["add", "shortcuts"]
+    );
+    assert.deepEqual(
+      two[1].buttons.map((b) => b.id),
+      ["export", "import", "folder"]
+    );
+    for (const row of two) {
+      assert.ok(row.buttons.length <= Core.toolbarMaxButtonsPerRow("two-row"));
+    }
+
+    const stack = Core.toolbarRowsForMode("stack");
+    assert.equal(stack.length, 5);
+    for (const row of stack) {
+      assert.equal(row.buttons.length, 1);
+      assert.ok(row.buttons.length <= Core.toolbarMaxButtonsPerRow("stack"));
+    }
+    // unknown mode falls back to two-row packing
+    assert.equal(Core.toolbarRowsForMode("nope").length, 2);
+  });
+
+  it("exposes a reparent-safe structure with remount strategy", () => {
+    const s = Core.toolbarStructure(400);
+    assert.equal(s.reparentSafe, true);
+    assert.equal(s.remountStrategy, "destroy-and-recreate");
+    assert.equal(s.mode, "two-row");
+    assert.equal(s.rows.length, 2);
+    const ids = s.rows.flatMap((r) => r.buttons.map((b) => b.id));
+    assert.equal(new Set(ids).size, ids.length, "button ids must be unique");
+    assert.equal(Core.toolbarButtons().length, 5);
+  });
+
+  it("toolbar mount plan is noop for same mode, remount on mode change", () => {
+    const first = Core.toolbarMountPlan(0, null, "two-row");
+    assert.equal(first.op, "mount");
+    assert.equal(first.reason, "initial-build");
+    assert.ok(first.rows.length >= 2);
+
+    const same = Core.toolbarMountPlan({
+      existingRowCount: first.rows.length,
+      currentMode: "two-row",
+      nextMode: "two-row",
+    });
+    assert.equal(same.op, "noop");
+    assert.equal(same.reason, "mode-unchanged");
+
+    const changed = Core.toolbarMountPlan({
+      existingRowCount: 2,
+      currentMode: "two-row",
+      nextMode: "stack",
+    });
+    assert.equal(changed.op, "remount");
+    assert.equal(changed.reason, "mode-changed");
+    assert.equal(changed.rows.length, 5);
+
+    assert.equal(Core.toolbarMountPlan(-1, null, "one-row").op, "mount");
+    assert.equal(Core.toolbarMountPlan("x", null, "bad-mode").mode, "two-row");
+  });
+});
+
+describe("resolveCopyPlan + materializeCopyText", () => {
+  it("defaults to raw copy (alwaysCopyRaw undefined/true)", () => {
+    const content = "Hello {{name}}";
+    assert.deepEqual(Core.resolveCopyPlan(content, true), {
+      action: "copy",
+      text: content,
+      vars: [],
+    });
+    assert.deepEqual(Core.resolveCopyPlan(content, undefined), {
+      action: "copy",
+      text: content,
+      vars: [],
+    });
+    assert.deepEqual(Core.resolveCopyPlan(content, null), {
+      action: "copy",
+      text: content,
+      vars: [],
+    });
+  });
+
+  it("opens fill only when alwaysCopyRaw is false and placeholders exist", () => {
+    const plan = Core.resolveCopyPlan("A {{x}} B {{y}}", false);
+    assert.equal(plan.action, "fill");
+    assert.equal(plan.text, null);
+    assert.deepEqual(plan.vars, ["x", "y"]);
+    const plain = Core.resolveCopyPlan("no placeholders", false);
+    assert.equal(plain.action, "copy");
+    assert.equal(plain.text, "no placeholders");
+  });
+
+  it("materializes raw vs filled clipboard text", () => {
+    assert.equal(Core.materializeCopyText("A {{x}}", { x: "1" }, true), "A {{x}}");
+    assert.equal(Core.materializeCopyText("A {{x}}", { x: "1" }, false), "A 1");
+    assert.equal(Core.materializeCopyText("A {{x}}", null, false), "A {{x}}");
+    assert.equal(Core.materializeCopyText(null, {}, true), "");
   });
 });
 

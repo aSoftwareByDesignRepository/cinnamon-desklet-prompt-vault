@@ -250,11 +250,13 @@
   color: #ffffff;
 }
 
-/* ---- Toolbar ------------------------------------------------------------ */
+/* ---- Footer toolbar (readable labels, responsive packing) --------------- */
 .prompt-vault-toolbar {
   spacing: 6px;
-  padding-top: 8px;
-  padding-bottom: 2px;
+  padding-top: 10px;
+  padding-bottom: 4px;
+  margin-top: 2px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
 }
 
 .prompt-vault-toolbar-row {
@@ -265,21 +267,23 @@
   spacing: 4px;
 }
 
+.prompt-vault-toolbar-compact .prompt-vault-toolbar-btn {
+  padding: 10px 12px;
+  min-height: 40px;
+}
+
 .prompt-vault-toolbar-btn {
-  padding: 8px 10px;
+  padding: 9px 10px;
+  min-height: 36px;
   border-radius: 10px;
   background-color: rgba(255, 255, 255, 0.09);
-  border: 2px solid rgba(255, 255, 255, 0.12);
+  border: 2px solid rgba(255, 255, 255, 0.14);
   color: #eef0f4;
   font-size: 0.9em;
 }
 
-.prompt-vault-toolbar-compact .prompt-vault-toolbar-btn {
-  padding: 10px 12px;
-}
-
 .prompt-vault-toolbar-btn-inner {
-  spacing: 8px;
+  spacing: 7px;
 }
 
 .prompt-vault-toolbar-label {
@@ -298,6 +302,14 @@
 .prompt-vault-btn-primary {
   background-color: #4c8dff;
   border: 2px solid #4c8dff;
+  color: #ffffff;
+  font-weight: bold;
+  font-size: 0.95em;
+  min-height: 38px;
+  padding: 9px 12px;
+}
+
+.prompt-vault-btn-primary .prompt-vault-toolbar-label {
   color: #ffffff;
   font-weight: bold;
 }
@@ -532,14 +544,14 @@
 
 /* ---- Edit dialog (Cinnamon ModalDialog) --------------------------------- */
 .prompt-vault-edit-dialog {
-  spacing: 12px;
+  spacing: 10px;
 }
 
 .prompt-vault-dialog-title {
   font-weight: bold;
   font-size: 1.15em;
   color: #ffffff;
-  padding-bottom: 8px;
+  padding-bottom: 6px;
 }
 
 .prompt-vault-dialog-slot-title {
@@ -549,13 +561,13 @@
 
 .prompt-vault-dialog-slot-hint {
   padding-top: 0;
-  padding-bottom: 6px;
-  line-height: 1.45;
+  padding-bottom: 4px;
+  line-height: 1.4;
 }
 
 .prompt-vault-dialog-slot-grid {
-  spacing: 10px;
-  padding-bottom: 16px;
+  spacing: 8px;
+  padding-bottom: 8px;
 }
 
 .prompt-vault-dialog-slot-row {
@@ -582,5 +594,6 @@
 }
 
 .prompt-vault-edit-dialog .prompt-vault-textarea {
-  min-height: 0;
+  /* Natural height comes from dialogContentMetrics — do not inflate via CSS. */
+  min-height: 120px;
 }

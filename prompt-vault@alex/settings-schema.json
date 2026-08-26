@@ -19,11 +19,11 @@
     "type": "header",
     "description": "Behaviour"
   },
-  "enable_templates": {
+  "always_copy_raw": {
     "type": "switch",
     "default": true,
-    "description": "Fill {{placeholders}} when copying",
-    "tooltip": "If a prompt contains {{name}} markers, you'll be asked to fill them in before the text is copied."
+    "description": "Always copy raw text",
+    "tooltip": "Copy prompts exactly as stored, including any {{placeholders}}. Turn off to open a fill-in form when a prompt has placeholders."
   },
   "confirm_delete": {
     "type": "switch",

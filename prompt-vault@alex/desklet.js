@@ -153,7 +153,7 @@ function _samplePrompts() {
   );
   return [
     mk({
-      title: "Desklet code review",
+      title: "Hephaestus — Desklet code review",
       category: "Desklet dev",
       content:
         "Review this Cinnamon desklet for correctness, Cinnamon/GJS API usage and UX.\n" +
@@ -163,16 +163,16 @@ function _samplePrompts() {
       hotkeySlot: 1,
     }),
     mk({
-      title: "Explain like I'm busy",
+      title: "Hermes — Explain like I'm busy",
       category: "Writing",
       content:
         "Explain {{topic}} in plain language.\n" +
         "Lead with the answer, then give 3-5 key bullet points. Keep it under 200 words.",
       tags: ["summary", "communication"],
-      notes: "Uses a {{topic}} placeholder you fill in on copy.",
+      notes: "Uses a {{topic}} placeholder (fill-in only if Always copy raw is off).",
     }),
     mk({
-      title: "Git commit message",
+      title: "Janus — Git commit message",
       category: "Dev workflow",
       content:
         "Write a concise git commit message (imperative mood, 1-2 sentences) for these changes.\n" +
@@ -190,8 +190,13 @@ class PromptEditDialog {
   constructor(desklet, existing) {
     this._desklet = desklet;
     this._existing = existing || null;
-    this._innerW = Math.max(420, Math.min(580, Number(desklet.panel_width) || 340));
-    this._scrollH = Math.max(280, Math.min(480, Number(desklet.list_height) || 300));
+    // Dialog width follows desklet width but stays in a readable range.
+    // Content viewport is NOT tied to list_height (that caused a huge empty textarea).
+    const seed = PvCore.dialogContentMetrics(0, {
+      dialogWidth: Number(desklet.panel_width) || PvCore.DIALOG_CONTENT.minDialogWidth,
+    });
+    this._innerW = seed.innerWidth;
+    this._viewportH = seed.viewportHeight;
 
     this._dialog = new ModalDialog.ModalDialog({ styleClass: "prompt-vault-edit-dialog" });
     desklet._trackDialog(this._dialog);
@@ -249,14 +254,10 @@ class PromptEditDialog {
 
     const slotHint = new St.Label({
       text:
-        _("Optional — link this prompt to a number below.") +
+        _("Optional. Pick 1–9 for") +
         " " +
         HOTKEY_COMBO_LABEL +
-        _("1–9 pastes it into the text field you are typing in.") +
-        " " +
-        _("None means no hotkey.") +
-        " " +
-        _("Click Shortcuts in the desklet toolbar once to install the keys."),
+        _("N paste, or None."),
       style_class: "prompt-vault-hint prompt-vault-dialog-slot-hint",
     });
     slotHint.clutter_text.line_wrap = true;
@@ -308,7 +309,7 @@ class PromptEditDialog {
       clip_to_allocation: true,
     });
     this._scroll.set_policy(St.PolicyType.NEVER, St.PolicyType.AUTOMATIC);
-    this._scroll.style = `height: ${this._scrollH}px;`;
+    this._scroll.style = `height: ${this._viewportH}px; max-height: ${this._viewportH}px;`;
     this._scrollInner = new St.BoxLayout({ vertical: true });
     this._scroll.add_actor(this._scrollInner);
     layout.add(this._scroll, { x_fill: true });
@@ -316,7 +317,7 @@ class PromptEditDialog {
     this._contentEntry = new St.Entry({
       style_class: "prompt-vault-input prompt-vault-textarea",
       can_focus: true,
-      hint_text: _("Your prompt text — scroll to read long prompts"),
+      hint_text: _("Type your prompt here"),
       clip_to_allocation: true,
     });
     _configureMultilineEntry(this._contentEntry);
@@ -338,7 +339,7 @@ class PromptEditDialog {
 
     layout.add(
       new St.Label({
-        text: _("Scroll for long text · Tab between fields · Ctrl+Enter to save"),
+        text: _("Tab between fields · Ctrl+Enter to save · Esc to cancel"),
         style_class: "prompt-vault-kbd-hint",
       }),
       { x_fill: true }
@@ -411,20 +412,26 @@ class PromptEditDialog {
 
   _syncContentLayout() {
     if (!this._scrollInner || !this._contentEntry) return;
-    const innerW = this._innerW;
-    // Subtract scroll + entry padding so line-wrap height matches what is actually rendered.
-    const textW = Math.max(180, innerW - 34);
-    const bottomPad = 40;
-    this._scrollInner.style = `width: ${innerW}px; min-width: ${innerW}px;`;
     const ct = this._contentEntry.clutter_text;
     try {
-      ct.set_size(textW * Pango.SCALE, -1);
-      const [, prefH] = ct.get_preferred_height(textW);
-      const boxH = Math.max(this._scrollH - 8, prefH + bottomPad);
-      this._scrollInner.style = `width: ${innerW}px; min-width: ${innerW}px; min-height: ${boxH}px;`;
-      this._contentEntry.set_height(boxH);
-      ct.set_min_height(boxH);
-      ct.set_size(textW * Pango.SCALE, boxH * Pango.SCALE);
+      // line_wrap_width is the ONLY ClutterText API that wants Pango units.
+      // Actor set_size / preferred height use pixels — never multiply those by Pango.SCALE.
+      const probe = PvCore.dialogContentMetrics(0, { dialogWidth: this._innerW });
+      ct.set_line_wrap(true);
+      ct.set_line_wrap_width(probe.textWidth * Pango.SCALE);
+      const [, prefH] = ct.get_preferred_height(probe.textWidth);
+      const m = PvCore.dialogContentMetrics(prefH, { dialogWidth: this._innerW });
+      this._viewportH = m.viewportHeight;
+      this._scroll.style =
+        `height: ${m.viewportHeight}px; max-height: ${m.viewportHeight}px; min-height: ${m.viewportHeight}px;`;
+      this._scrollInner.style =
+        `width: ${m.innerWidth}px; min-width: ${m.innerWidth}px; min-height: ${m.entryHeight}px;`;
+      this._contentEntry.set_height(m.entryHeight);
+      try {
+        ct.set_height(m.entryHeight);
+      } catch (e2) {
+        /* older Clutter */
+      }
       this._scrollInner.queue_relayout();
       this._scroll.queue_relayout();
     } catch (e) {
@@ -588,7 +595,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
     this._settings.bind("show_usage", "show_usage", this._renderList.bind(this));
     this._settings.bind("confirm_delete", "confirm_delete", null);
     this._settings.bind("auto_backup", "auto_backup", null);
-    this._settings.bind("enable_templates", "enable_templates", null);
+    this._settings.bind("always_copy_raw", "always_copy_raw", null);
     this._settings.bind("panel_width", "panel_width", this._onDimensionsChanged.bind(this));
     this._settings.bind("list_height", "list_height", this._onDimensionsChanged.bind(this));
 
@@ -884,31 +891,16 @@ class PromptVaultDesklet extends Desklet.Desklet {
     }
     this._listBox = new St.BoxLayout({ vertical: true, style_class: "prompt-vault-list" });
     this._scrollView.add_actor(this._listBox);
-    this._listPanel.add(this._scrollView, { expand: true, x_fill: true, y_fill: true });
+    // Never expand:true here — St.BoxLayout would steal height from the footer
+    // toolbar and make the action buttons disappear or clip to 0.
+    this._listPanel.add(this._scrollView, { expand: false, x_fill: true, y_fill: false });
 
-    this._toolbar = new St.BoxLayout({ vertical: true, style_class: "prompt-vault-toolbar" });
-    this._toolbarBtns = [
-      this._mkTextBtn(
-        null,
-        "list-add-symbolic",
-        _("Add prompt"),
-        () => this._openEditor(null),
-        "prompt-vault-btn-primary"
-      ),
-      this._mkTextBtn(
-        null,
-        "input-keyboard-symbolic",
-        _("Shortcuts"),
-        () => this._setupKeyboardShortcuts(),
-        "prompt-vault-btn-shortcuts"
-      ),
-      this._mkTextBtn(null, "document-save-symbolic", _("Export"), () => this._exportBackup()),
-      this._mkTextBtn(null, "document-open-symbolic", _("Import"), () => this._importBackup(false)),
-      this._mkTextBtn(null, "folder-symbolic", _("Data folder"), () => this._openDataFolder()),
-    ];
-    this._listPanel.add(this._toolbar, { x_fill: true });
+    this._root.add(this._listPanel, { expand: false, x_fill: true, y_fill: false });
 
-    this._root.add(this._listPanel, { expand: true, x_fill: true, y_fill: true });
+    // Footer toolbar is a root sibling (not inside listPanel) so list reflows
+    // and template view cannot crush or orphan its actors.
+    this._buildStableToolbar();
+    this._root.add(this._toolbar, { x_fill: true, expand: false, y_fill: false });
 
     this._buildTemplatePanel();
 
@@ -927,6 +919,111 @@ class PromptVaultDesklet extends Desklet.Desklet {
     this._status.clutter_text.line_wrap = true;
     this._statusRow.add(this._status, { expand: true, x_fill: true, y_align: St.Align.MIDDLE });
     this._root.add(this._statusRow, { x_fill: true });
+  }
+
+  /**
+   * Footer toolbar: readable labels at every width.
+   * Packing changes use destroy-and-recreate (never reparent live buttons).
+   */
+  _buildStableToolbar() {
+    this._toolbar = new St.BoxLayout({
+      vertical: true,
+      style_class: "prompt-vault-toolbar",
+      reactive: true,
+    });
+    this._toolbarMode = null;
+    this._toolbarById = Object.create(null);
+    this._toolbarLabels = {
+      add: _("Add prompt"),
+      shortcuts: _("Shortcuts"),
+      export: _("Export"),
+      import: _("Import"),
+      folder: _("Data folder"),
+    };
+    this._toolbarHandlers = {
+      add: () => this._openEditor(null),
+      shortcuts: () => this._setupKeyboardShortcuts(),
+      export: () => this._exportBackup(),
+      import: () => this._importBackup(false),
+      folder: () => this._openDataFolder(),
+    };
+    this._remountToolbar(true);
+  }
+
+  _clearToolbarActors() {
+    if (!this._toolbar) return;
+    while (this._toolbar.get_n_children() > 0) {
+      const child = this._toolbar.get_child_at_index(0);
+      this._toolbar.remove_actor(child);
+      try {
+        child.destroy();
+      } catch (e) {
+        /* ignore */
+      }
+    }
+    this._toolbarById = Object.create(null);
+  }
+
+  _remountToolbar(force) {
+    if (!this._toolbar) return;
+    const mode = PvCore.toolbarLayoutMode(this._getPanelWidth());
+    const plan = PvCore.toolbarMountPlan({
+      existingRowCount: this._toolbar.get_n_children(),
+      currentMode: this._toolbarMode,
+      nextMode: mode,
+    });
+    if (!force && plan.op === "noop") {
+      this._applyToolbarDensity(mode);
+      return;
+    }
+    if (!plan.rows || !plan.rows.length) {
+      global.logError("[Prompt Vault] toolbar mount plan missing rows");
+      return;
+    }
+
+    // Destroy previous rows+buttons, then create fresh actors for this mode.
+    // Never reparent surviving button refs — that was the vanish bug.
+    this._clearToolbarActors();
+
+    const styleClass = {
+      primary: "prompt-vault-btn-primary",
+      shortcuts: "prompt-vault-btn-shortcuts",
+      "": null,
+    };
+
+    for (const rowSpec of plan.rows) {
+      const row = new St.BoxLayout({
+        vertical: false,
+        style_class: "prompt-vault-toolbar-row",
+      });
+      for (const btnSpec of rowSpec.buttons) {
+        const extra = styleClass[btnSpec.style] || null;
+        const btn = this._mkTextBtn(
+          row,
+          btnSpec.icon,
+          this._toolbarLabels[btnSpec.id] || btnSpec.id,
+          this._toolbarHandlers[btnSpec.id] || (() => {}),
+          extra
+        );
+        this._toolbarById[btnSpec.id] = btn;
+      }
+      this._toolbar.add(row, { x_fill: true, expand: false });
+    }
+
+    this._toolbarMode = plan.mode || mode;
+    this._applyToolbarDensity(this._toolbarMode);
+    this._toolbar.queue_relayout();
+  }
+
+  _applyToolbarDensity(mode) {
+    if (!this._toolbar) return;
+    if (mode === "stack") this._toolbar.add_style_class_name("prompt-vault-toolbar-compact");
+    else this._toolbar.remove_style_class_name("prompt-vault-toolbar-compact");
+  }
+
+  /** Called from dimension changes — remount only when packing mode changes. */
+  _updateToolbarChrome() {
+    this._remountToolbar(false);
   }
 
   _buildTemplatePanel() {
@@ -993,6 +1090,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
     this._templateFocusChain = [];
 
     this._listPanel.show();
+    if (this._toolbar) this._toolbar.show();
     this._templatePanel.hide();
     this._backBtn.hide();
     this._headerLabel.text = _("Prompt Vault");
@@ -1006,6 +1104,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
     this._templateRow = row;
 
     this._listPanel.hide();
+    if (this._toolbar) this._toolbar.hide();
     this._templatePanel.show();
     this._backBtn.show();
     this._headerLabel.text = _("Fill placeholders");
@@ -1050,12 +1149,12 @@ class PromptVaultDesklet extends Desklet.Desklet {
       this._showListView();
       return;
     }
-    let text = prompt.content;
+    let values = null;
     if (!raw && this._templateEntries) {
-      const values = {};
+      values = {};
       for (const [k, e] of Object.entries(this._templateEntries)) values[k] = e.get_text();
-      text = _applyTemplate(prompt.content, values);
     }
+    const text = PvCore.materializeCopyText(prompt.content, values, !!raw);
     this._showListView();
     this._doCopy(text, prompt, row);
   }
@@ -1130,11 +1229,11 @@ class PromptVaultDesklet extends Desklet.Desklet {
     if (this._root) {
       this._root.style = `width: ${w}px; max-width: ${w}px; min-width: ${w}px;`;
     }
-    // Fixed list height keeps the toolbar + status pinned below the scroll area.
-    if (this._scrollView) this._scrollView.style = `height: ${h}px; max-height: ${h}px;`;
+    // Fixed list height keeps the footer toolbar + status pinned below the scroll area.
+    if (this._scrollView) this._scrollView.style = `height: ${h}px; max-height: ${h}px; min-height: ${h}px;`;
     if (this._templateScroll) this._templateScroll.style = `height: ${formH}px; min-height: ${formH}px;`;
     this._layoutScrollContent(this._templateScroll, this._templateFieldsBox, w);
-    this._layoutToolbar();
+    this._updateToolbarChrome();
   }
 
   // Tracked timeout so nothing fires after the desklet is removed.
@@ -1489,7 +1588,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
   _mkTextBtn(parent, iconName, label, onClick, extraClass) {
     const box = new St.BoxLayout({ vertical: false, style_class: "prompt-vault-toolbar-btn-inner" });
     box.add(
-      new St.Icon({ icon_name: iconName, icon_type: St.IconType.SYMBOLIC, icon_size: 15 }),
+      new St.Icon({ icon_name: iconName, icon_type: St.IconType.SYMBOLIC, icon_size: 16 }),
       { y_align: St.Align.MIDDLE, y_fill: false }
     );
     const text = new St.Label({ text: label, style_class: "prompt-vault-toolbar-label" });
@@ -1510,43 +1609,6 @@ class PromptVaultDesklet extends Desklet.Desklet {
     btn.connect("clicked", () => onClick());
     if (parent) parent.add(btn, { expand: true, x_fill: true });
     return btn;
-  }
-
-  _clearToolbarRows() {
-    if (!this._toolbar) return;
-    while (this._toolbar.get_n_children() > 0) {
-      this._toolbar.remove_actor(this._toolbar.get_child_at_index(0));
-    }
-  }
-
-  _addToolbarRow(buttons, fullWidth) {
-    const row = new St.BoxLayout({ vertical: false, style_class: "prompt-vault-toolbar-row" });
-    for (const btn of buttons) {
-      row.add(btn, { expand: true, x_fill: true });
-    }
-    this._toolbar.add(row, { x_fill: fullWidth, expand: false });
-  }
-
-  // Reflow toolbar so icon + text labels stay readable at every desklet width.
-  _layoutToolbar() {
-    if (!this._toolbar || !this._toolbarBtns || !this._toolbarBtns.length) return;
-
-    const w = this._getPanelWidth();
-    const btns = this._toolbarBtns;
-    const mode = PvCore.toolbarLayoutMode(w);
-    this._clearToolbarRows();
-    this._toolbar.remove_style_class_name("prompt-vault-toolbar-compact");
-
-    if (mode === "one-row") {
-      this._addToolbarRow(btns, true);
-    } else if (mode === "two-row") {
-      this._addToolbarRow(btns.slice(0, 2), true);
-      this._addToolbarRow(btns.slice(2), true);
-    } else {
-      this._toolbar.add_style_class_name("prompt-vault-toolbar-compact");
-      for (const btn of btns) this._addToolbarRow([btn], true);
-    }
-    this._toolbar.queue_relayout();
   }
 
   // -- Status / feedback ----------------------------------------------------
@@ -1968,8 +2030,9 @@ class PromptVaultDesklet extends Desklet.Desklet {
     }
     body.add(chips, { x_fill: true, expand: false });
 
+    const copyTip = prompt.title + "\n" + _("Click to copy");
     this._a11y(body, _("Copy") + ": " + prompt.title);
-    new Tooltips.Tooltip(body, _("Click to copy to clipboard"));
+    new Tooltips.Tooltip(body, copyTip);
     const doCopy = () => this._copyPrompt(prompt, row);
     body.connect("button-press-event", (_a, event) => {
       if (event.get_button() !== 1) return Clutter.EVENT_PROPAGATE;
@@ -1988,7 +2051,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
 
     const actions = new St.BoxLayout({ vertical: false, style_class: "prompt-vault-actions" });
     actions.add(
-      this._mkIconBtn("edit-copy-symbolic", _("Copy to clipboard"), () => this._copyPrompt(prompt, row))
+      this._mkIconBtn("edit-copy-symbolic", copyTip, () => this._copyPrompt(prompt, row))
     );
     const moreBtn = this._mkIconBtn("open-menu-symbolic", _("More actions"), () => {
       this._openRowMoreMenu(moreBtn, prompt, row);
@@ -2080,12 +2143,12 @@ class PromptVaultDesklet extends Desklet.Desklet {
   }
 
   _copyPrompt(prompt, row) {
-    const vars = this.enable_templates ? _extractTemplateVars(prompt.content) : [];
-    if (vars.length > 0) {
-      this._showTemplatePanel(prompt, vars, row);
+    const plan = PvCore.resolveCopyPlan(prompt.content, this.always_copy_raw);
+    if (plan.action === "fill") {
+      this._showTemplatePanel(prompt, plan.vars, row);
       return;
     }
-    this._doCopy(prompt.content, prompt, row);
+    this._doCopy(plan.text, prompt, row);
   }
 
   _doCopy(text, prompt, row) {

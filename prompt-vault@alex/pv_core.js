@@ -40,6 +40,19 @@ var PANEL = {
   rootPadX: 32,
 };
 
+/** Edit-dialog content area — independent of desklet list height. */
+var DIALOG_CONTENT = {
+  minViewport: 140,
+  maxViewport: 220,
+  minEntry: 120,
+  pad: 20,
+  /** Horizontal chrome inside the scroll (padding + border). */
+  textChromeX: 34,
+  minTextWidth: 180,
+  minDialogWidth: 420,
+  maxDialogWidth: 560,
+};
+
 var TEMPLATE_RE = /\{\{\s*([^{}]+?)\s*\}\}/g;
 
 function asStr(v) {
@@ -240,7 +253,59 @@ function titleWrapWidth(panelWidth) {
 }
 
 /**
- * Toolbar button packing strategy by width.
+ * Dialog content textarea metrics.
+ * Shrink-wraps short prompts; caps the viewport so empty/new prompts never open
+ * as a huge empty cavern. Entry may grow beyond the viewport (scroll handles it).
+ *
+ * CRITICAL: never couple this to desklet list_height, and never feed Pango.SCALE
+ * into ClutterActor.set_size (pixels only).
+ *
+ * @param {number} preferredTextHeightPx - from ClutterText.get_preferred_height
+ * @param {object} [opts]
+ * @returns {{ viewportHeight: number, entryHeight: number, textWidth: number, innerWidth: number }}
+ */
+function dialogContentMetrics(preferredTextHeightPx, opts) {
+  opts = opts || {};
+  var minView = Number(opts.minViewport);
+  var maxView = Number(opts.maxViewport);
+  var minEntry = Number(opts.minEntry);
+  var pad = Number(opts.pad);
+  var dialogW = Number(opts.dialogWidth);
+  if (!Number.isFinite(minView)) minView = DIALOG_CONTENT.minViewport;
+  if (!Number.isFinite(maxView)) maxView = DIALOG_CONTENT.maxViewport;
+  if (!Number.isFinite(minEntry)) minEntry = DIALOG_CONTENT.minEntry;
+  if (!Number.isFinite(pad)) pad = DIALOG_CONTENT.pad;
+  if (!Number.isFinite(dialogW)) dialogW = DIALOG_CONTENT.minDialogWidth;
+
+  minView = Math.max(80, Math.floor(minView));
+  maxView = Math.max(minView, Math.floor(maxView));
+  minEntry = Math.max(40, Math.floor(minEntry));
+  pad = Math.max(0, Math.floor(pad));
+
+  var innerWidth = Math.max(
+    DIALOG_CONTENT.minDialogWidth,
+    Math.min(DIALOG_CONTENT.maxDialogWidth, Math.floor(dialogW))
+  );
+  var textWidth = Math.max(DIALOG_CONTENT.minTextWidth, innerWidth - DIALOG_CONTENT.textChromeX);
+
+  var pref = Number(preferredTextHeightPx);
+  if (!Number.isFinite(pref) || pref < 0) pref = 0;
+  pref = Math.floor(pref);
+
+  var entryHeight = Math.max(minEntry, pref + pad);
+  // Viewport follows content up to max — never forces empty space to list_height.
+  var viewportHeight = Math.max(minView, Math.min(maxView, entryHeight));
+
+  return {
+    viewportHeight: viewportHeight,
+    entryHeight: entryHeight,
+    textWidth: textWidth,
+    innerWidth: innerWidth,
+  };
+}
+
+/**
+ * Responsive toolbar packing — same breakpoints as the original readable layout.
  * @returns {"one-row"|"two-row"|"stack"}
  */
 function toolbarLayoutMode(panelWidth) {
@@ -248,6 +313,150 @@ function toolbarLayoutMode(panelWidth) {
   if (w >= 520) return "one-row";
   if (w >= 300) return "two-row";
   return "stack";
+}
+
+/** Canonical footer actions (order matters for packing). */
+function toolbarButtons() {
+  return [
+    { id: "add", icon: "list-add-symbolic", style: "primary" },
+    { id: "shortcuts", icon: "input-keyboard-symbolic", style: "shortcuts" },
+    { id: "export", icon: "document-save-symbolic", style: "" },
+    { id: "import", icon: "document-open-symbolic", style: "" },
+    { id: "folder", icon: "folder-symbolic", style: "" },
+  ];
+}
+
+/**
+ * Pack buttons into rows so every label stays fully readable.
+ * - one-row: all five across (wide desklets)
+ * - two-row: Add+Shortcuts, then Export+Import+Folder
+ * - stack: one full-width button per row (narrow)
+ *
+ * @param {string} mode
+ * @returns {Array<{ id: string, buttons: Array }>}
+ */
+function toolbarRowsForMode(mode) {
+  var btns = toolbarButtons();
+  var m = asStr(mode).trim().toLowerCase();
+  if (m === "one-row") {
+    return [{ id: "all", buttons: btns.slice() }];
+  }
+  if (m === "stack") {
+    return btns.map(function (b) {
+      return { id: "row-" + b.id, buttons: [b] };
+    });
+  }
+  // two-row (default / unknown)
+  return [
+    { id: "primary", buttons: [btns[0], btns[1]] },
+    { id: "secondary", buttons: [btns[2], btns[3], btns[4]] },
+  ];
+}
+
+/**
+ * Blueprint for the current width. Remount destroys+recreates — never reparents.
+ * @param {number} [panelWidth]
+ */
+function toolbarStructure(panelWidth) {
+  var mode = toolbarLayoutMode(panelWidth);
+  return {
+    reparentSafe: true,
+    remountStrategy: "destroy-and-recreate",
+    mode: mode,
+    rows: toolbarRowsForMode(mode),
+  };
+}
+
+/**
+ * Mount / remount plan. Same mode + existing rows ⇒ noop (no flicker).
+ * Mode change ⇒ remount with fresh rows (caller destroys children first).
+ *
+ * @param {number|object} existingRowCountOrOpts
+ * @param {string} [currentMode]
+ * @param {string} [nextMode]
+ */
+function toolbarMountPlan(existingRowCountOrOpts, currentMode, nextMode) {
+  var existing;
+  var cur;
+  var next;
+  if (existingRowCountOrOpts && typeof existingRowCountOrOpts === "object") {
+    existing = existingRowCountOrOpts.existingRowCount;
+    cur = existingRowCountOrOpts.currentMode;
+    next = existingRowCountOrOpts.nextMode;
+  } else {
+    existing = existingRowCountOrOpts;
+    cur = currentMode;
+    next = nextMode;
+  }
+
+  var n = Number(existing);
+  if (!Number.isFinite(n) || n < 0) n = 0;
+  n = Math.floor(n);
+
+  var mode = asStr(next).trim().toLowerCase();
+  if (mode !== "one-row" && mode !== "two-row" && mode !== "stack") {
+    mode = "two-row";
+  }
+  var prev = asStr(cur).trim().toLowerCase();
+
+  if (n > 0 && prev === mode) {
+    return { op: "noop", reason: "mode-unchanged", mode: mode };
+  }
+  if (n > 0) {
+    return {
+      op: "remount",
+      reason: "mode-changed",
+      mode: mode,
+      rows: toolbarRowsForMode(mode),
+    };
+  }
+  return {
+    op: "mount",
+    reason: "initial-build",
+    mode: mode,
+    rows: toolbarRowsForMode(mode),
+  };
+}
+
+/**
+ * Max buttons allowed on any single toolbar row for a mode (readability guard).
+ * @param {string} mode
+ */
+function toolbarMaxButtonsPerRow(mode) {
+  var m = asStr(mode).trim().toLowerCase();
+  if (m === "one-row") return 5;
+  if (m === "stack") return 1;
+  return 3; // two-row
+}
+
+/**
+ * Decide whether a click copies immediately or opens the fill panel.
+ * Default / undefined alwaysCopyRaw ⇒ copy raw (never trap the user in a form).
+ * @param {string} content
+ * @param {boolean} [alwaysCopyRaw]
+ * @returns {{ action: "copy"|"fill", text: string|null, vars: string[] }}
+ */
+function resolveCopyPlan(content, alwaysCopyRaw) {
+  var text = asStr(content);
+  if (alwaysCopyRaw !== false) {
+    return { action: "copy", text: text, vars: [] };
+  }
+  var vars = extractTemplateVars(text);
+  if (!vars.length) {
+    return { action: "copy", text: text, vars: [] };
+  }
+  return { action: "fill", text: null, vars: vars };
+}
+
+/**
+ * Produce clipboard text after an optional fill-in step.
+ * @param {string} content
+ * @param {Object<string,string>|null} values
+ * @param {boolean} raw
+ */
+function materializeCopyText(content, values, raw) {
+  if (raw) return asStr(content);
+  return applyTemplate(asStr(content), values || {});
 }
 
 function formatHotkeyLabel(slot, superLabel) {
@@ -439,6 +648,7 @@ var PvCore = {
   LIMITS: LIMITS,
   ROW_CHROME_PX: ROW_CHROME_PX,
   PANEL: PANEL,
+  DIALOG_CONTENT: DIALOG_CONTENT,
   asStr: asStr,
   clampStr: clampStr,
   asIso: asIso,
@@ -458,7 +668,15 @@ var PvCore = {
   clampListHeight: clampListHeight,
   innerContentWidth: innerContentWidth,
   titleWrapWidth: titleWrapWidth,
+  dialogContentMetrics: dialogContentMetrics,
   toolbarLayoutMode: toolbarLayoutMode,
+  toolbarButtons: toolbarButtons,
+  toolbarRowsForMode: toolbarRowsForMode,
+  toolbarStructure: toolbarStructure,
+  toolbarMountPlan: toolbarMountPlan,
+  toolbarMaxButtonsPerRow: toolbarMaxButtonsPerRow,
+  resolveCopyPlan: resolveCopyPlan,
+  materializeCopyText: materializeCopyText,
   formatHotkeyLabel: formatHotkeyLabel,
   formatHotkeyCompact: formatHotkeyCompact,
   filterAndSortPrompts: filterAndSortPrompts,

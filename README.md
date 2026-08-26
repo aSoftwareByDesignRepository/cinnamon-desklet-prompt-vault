@@ -12,15 +12,15 @@ you reuse, find them instantly, and copy them to the clipboard with one click.
 - **Filter** by category or by ★ favorites with one click.
 - **Copy** to the clipboard by clicking a prompt (or the copy button). A green
   flash and a status line confirm it.
-- **`{{placeholder}}` fill-in** — if a prompt contains `{{name}}` markers, you are
-  asked to fill them in before copying (toggle in settings). Great for templates
-  like *"Summarize {{topic}} in {{n}} bullet points"*.
+- **Always copy raw** (default) — prompts are copied exactly as stored. Turn off
+  *Always copy raw text* in settings if you want `{{placeholder}}` fill-in before copy.
 - **Usage stats** — prompts remember how often and how recently they were copied,
   and can be sorted by "most copied" or "recently used".
 - **Global keyboard shortcuts** — assign each prompt to slot 1–9, install shortcuts once,
   then press **Super+Ctrl+1** … **Super+Ctrl+9** to **paste** that prompt
   into whatever field is focused (also copied to the clipboard; raw text, no `{{placeholder}}` fill).
-- **Favorites, duplicate, edit, delete** — edit opens a proper dialog; template fill stays inline, with optional delete
+- **Favorites, duplicate, edit, delete** — edit opens a proper dialog; optional
+  template fill stays inline when *Always copy raw* is off, with optional delete
   confirmation.
 - **Backup & restore** — export a timestamped JSON file; import by merge or full
   replace; a rolling auto-backup is kept on every change so a save can never lose
@@ -32,8 +32,11 @@ you reuse, find them instantly, and copy them to the clipboard with one click.
 
 Desklets live on the desktop layer, which normally never receives the keyboard.
 Prompt Vault takes a proper compositor input grab for the **search box** and
-**template fill** forms. **Add/edit** opens a Cinnamon modal dialog (same
-mechanism as system confirmations) with its own focus and scroll handling.
+optional **template fill** forms (only when *Always copy raw* is off). **Add/edit**
+opens a Cinnamon modal dialog (same mechanism as system confirmations) with its
+own focus and scroll handling. The footer actions (**Add prompt**, Shortcuts,
+Export, Import, Data folder) are a stable chrome strip — they are never
+reparented during resize, so they cannot vanish.
 
 - Typing, selection (drag or double-click), and the cursor all go to the field
   you clicked — never to a background window.

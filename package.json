@@ -4,11 +4,12 @@
   "version": "1.0.0",
   "description": "Test harness for Prompt Vault domain core and CLI helpers",
   "scripts": {
-    "test": "node --test test/unit/*.test.js test/integration/*.test.js",
+    "test": "node --test test/unit/*.test.js test/integration/*.test.js test/e2e/*.test.js",
     "test:unit": "node --test test/unit/*.test.js",
     "test:integration": "node --test test/integration/*.test.js",
+    "test:e2e": "node --test test/e2e/*.test.js",
     "test:python": "python3 -m pytest -q test/python",
-    "test:coverage": "c8 --check-coverage --lines 95 --functions 95 --branches 85 --statements 95 --include 'prompt-vault@alex/pv_core.js' --reporter text --reporter lcov node --test test/unit/*.test.js test/integration/*.test.js",
+    "test:coverage": "c8 --check-coverage --lines 95 --functions 95 --branches 85 --statements 95 --include 'prompt-vault@alex/pv_core.js' --reporter text --reporter lcov node --test test/unit/*.test.js test/integration/*.test.js test/e2e/*.test.js",
     "test:mutation": "npx --yes @stryker-mutator/core@8.7.1 run",
     "test:all": "npm run test:coverage && npm run test:python && npm run test:mutation"
   },
