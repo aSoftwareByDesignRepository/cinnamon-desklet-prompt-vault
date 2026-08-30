@@ -22,12 +22,19 @@ var LIMITS = {
 
 /** Horizontal chrome reserved inside a prompt row (star + actions + padding). */
 var ROW_CHROME_PX = {
-  star: 28,
-  /** Copy + ⋯ more menu. */
-  actions: 60,
-  rowPadding: 14,
-  bodyPadding: 10,
-  gaps: 8,
+  star: 36,
+  /** Labeled Copy + ⋯ more menu. */
+  actions: 108,
+  rowPadding: 16,
+  bodyPadding: 12,
+  gaps: 10,
+};
+
+/** Hard caps so a hostile JSON file cannot freeze Cinnamon or exhaust RAM. */
+var STORE_LIMITS = {
+  maxBytes: 5 * 1024 * 1024,
+  maxPrompts: 500,
+  maxIdLen: 80,
 };
 
 var PANEL = {
@@ -56,7 +63,45 @@ var DIALOG_CONTENT = {
   dialogChromeHeight: 380,
 };
 
-var TEMPLATE_RE = /\{\{\s*([^{}]+?)\s*\}\}/g;
+var TEMPLATE_RE_SOURCE = "\\{\\{\\s*([^{}]+?)\\s*\\}\\}";
+
+function _templateRe() {
+  // Always a fresh /g regex. Reusing one global instance leaks lastIndex
+  // (extractTemplateVars can break early at LIMITS.templateVars).
+  return new RegExp(TEMPLATE_RE_SOURCE, "g");
+}
+
+function isReservedKey(name) {
+  return name === "__proto__" || name === "constructor" || name === "prototype";
+}
+
+function isSafePromptId(id) {
+  if (typeof id !== "string" || !id) return false;
+  if (id.length > STORE_LIMITS.maxIdLen) return false;
+  if (isReservedKey(id)) return false;
+  if (/[\x00-\x1f\x7f\/\\]/.test(id)) return false;
+  return true;
+}
+
+function isSafeTemplateVar(name) {
+  name = asStr(name).trim();
+  if (!name || name.length > 60) return false;
+  if (isReservedKey(name)) return false;
+  return /^[A-Za-z][A-Za-z0-9._-]*$/.test(name);
+}
+
+function isUsableDataDirPath(p) {
+  p = asStr(p);
+  if (!p || p.indexOf("\0") !== -1) return false;
+  if (p.length > 4096) return false;
+  return true;
+}
+
+function exceedsStoreLimits(promptCount, byteLength) {
+  if (Number(promptCount) > STORE_LIMITS.maxPrompts) return "prompts";
+  if (Number(byteLength) > STORE_LIMITS.maxBytes) return "bytes";
+  return null;
+}
 
 function asStr(v) {
   if (typeof v === "string") return v;
@@ -97,7 +142,7 @@ function normalizeTags(raw) {
   else return [];
 
   var out = [];
-  var seen = {};
+  var seen = Object.create(null);
   for (var i = 0; i < arr.length; i++) {
     var t = clampStr(String(arr[i]).trim(), LIMITS.tag);
     var key = t.toLowerCase();
@@ -115,25 +160,25 @@ function tagsToString(tags) {
 }
 
 function extractTemplateVars(content) {
-  TEMPLATE_RE.lastIndex = 0;
-  var seen = {};
+  var re = _templateRe();
+  var seen = Object.create(null);
   var out = [];
   var m;
-  while ((m = TEMPLATE_RE.exec(content)) !== null) {
+  while ((m = re.exec(content)) !== null) {
     var name = m[1].trim();
-    if (name && !seen[name]) {
-      seen[name] = true;
-      out.push(name);
-      if (out.length >= LIMITS.templateVars) break;
-    }
+    if (!isSafeTemplateVar(name) || seen[name]) continue;
+    seen[name] = true;
+    out.push(name);
+    if (out.length >= LIMITS.templateVars) break;
   }
   return out;
 }
 
 function applyTemplate(content, values) {
-  values = values || {};
-  return asStr(content).replace(TEMPLATE_RE, function (match, rawName) {
+  values = values && typeof values === "object" ? values : {};
+  return asStr(content).replace(_templateRe(), function (match, rawName) {
     var key = rawName.trim();
+    if (!isSafeTemplateVar(key)) return match;
     return Object.prototype.hasOwnProperty.call(values, key) ? values[key] : match;
   });
 }
@@ -149,7 +194,7 @@ function sanitizePrompt(raw, deps) {
   var p = isPlainObject(raw) ? raw : {};
   var now = deps.now();
   return {
-    id: typeof p.id === "string" && p.id ? p.id : deps.uuid(),
+    id: isSafePromptId(p.id) ? p.id : deps.uuid(),
     title: clampStr(asStr(p.title).trim() || "Untitled", LIMITS.title),
     category: clampStr(asStr(p.category).trim() || "General", LIMITS.category),
     content: clampStr(asStr(p.content), LIMITS.content),
@@ -162,6 +207,85 @@ function sanitizePrompt(raw, deps) {
     lastUsedAt: asIso(p.lastUsedAt),
     useCount: asCount(p.useCount),
   };
+}
+
+/**
+ * Later duplicate ids get a new uuid so delete-by-id / findIndex cannot
+ * hit two rows at once. First claim keeps the original id.
+ */
+function uniquifyPromptIds(prompts, uuidFn) {
+  if (typeof uuidFn !== "function") {
+    throw new Error("uniquifyPromptIds requires uuidFn");
+  }
+  var seen = Object.create(null);
+  var list = Array.isArray(prompts) ? prompts : [];
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    var p = list[i];
+    if (!p || typeof p !== "object") continue;
+    var id = p.id;
+    if (!isSafePromptId(id) || seen[id]) {
+      var nextId = uuidFn();
+      var guard = 0;
+      while ((!isSafePromptId(nextId) || seen[nextId]) && guard < 32) {
+        nextId = uuidFn();
+        guard++;
+      }
+      p = Object.assign({}, p, { id: nextId });
+    }
+    seen[p.id] = true;
+    out.push(p);
+  }
+  return out;
+}
+
+function sanitizePromptList(rawList, deps) {
+  if (!deps || typeof deps.uuid !== "function" || typeof deps.now !== "function") {
+    throw new Error("sanitizePromptList requires deps.uuid and deps.now");
+  }
+  if (!Array.isArray(rawList)) return [];
+  var objects = [];
+  var i;
+  for (i = 0; i < rawList.length; i++) {
+    if (isPlainObject(rawList[i])) objects.push(rawList[i]);
+  }
+  var sanitized = [];
+  for (i = 0; i < objects.length; i++) {
+    sanitized.push(sanitizePrompt(objects[i], deps));
+  }
+  return uniquifyPromptIds(sanitized, deps.uuid);
+}
+
+/**
+ * After quarantine, prompts.json is gone but backups remain. Seeding samples
+ * would hide the user's real data behind tutorial prompts.
+ * Fail closed: unknown / hostile sibling counts never seed.
+ */
+function shouldSeedSamples(promptsFileExists, siblingJsonCount) {
+  if (promptsFileExists !== false) return false;
+  if (typeof siblingJsonCount !== "number" || !Number.isFinite(siblingJsonCount)) return false;
+  if (siblingJsonCount < 0) return false;
+  return siblingJsonCount === 0;
+}
+
+function countRecoverableVaultJson(fileNames, liveName) {
+  liveName = asStr(liveName) || "prompts.json";
+  if (!Array.isArray(fileNames)) return 0;
+  var n = 0;
+  for (var i = 0; i < fileNames.length; i++) {
+    var name = asStr(fileNames[i]);
+    if (!name || name === liveName || name === "prompts.json.lock") continue;
+    var lower = name.toLowerCase();
+    if (lower.length < 5 || lower.slice(-5) !== ".json") continue;
+    n++;
+  }
+  return n;
+}
+
+/** Tab must propagate in list view (empty chain) — WCAG 2.1.2. */
+function shouldTrapTab(focusChainLength) {
+  var n = Number(focusChainLength);
+  return Number.isFinite(n) && n > 0;
 }
 
 /** First claim wins; later duplicates are cleared. Mutates prompts in place. */
@@ -212,14 +336,43 @@ function parsePromptsPayload(parsed) {
 }
 
 function mergePromptsById(existing, incoming) {
-  var byId = {};
+  var byId = Object.create(null);
   var i;
   var list = existing || [];
-  for (i = 0; i < list.length; i++) byId[list[i].id] = list[i];
+  for (i = 0; i < list.length; i++) {
+    if (list[i] && isSafePromptId(list[i].id)) byId[list[i].id] = list[i];
+  }
   list = incoming || [];
-  for (i = 0; i < list.length; i++) byId[list[i].id] = list[i];
+  for (i = 0; i < list.length; i++) {
+    if (list[i] && isSafePromptId(list[i].id)) byId[list[i].id] = list[i];
+  }
   return Object.keys(byId).map(function (k) {
     return byId[k];
+  });
+}
+
+/**
+ * Keep desklet field edits, but never lose a higher useCount written by the
+ * hotkey CLI in the same file.
+ */
+function mergeUsageFromDisk(memory, disk) {
+  var byId = Object.create(null);
+  var i;
+  var dlist = disk || [];
+  for (i = 0; i < dlist.length; i++) {
+    if (dlist[i] && isSafePromptId(dlist[i].id)) byId[dlist[i].id] = dlist[i];
+  }
+  return (memory || []).map(function (p) {
+    var d = p && byId[p.id];
+    if (!d) return p;
+    var next = Object.assign({}, p);
+    var mu = asCount(p.useCount);
+    var du = asCount(d.useCount);
+    next.useCount = mu > du ? mu : du;
+    var mt = asIso(p.lastUsedAt);
+    var dt = asIso(d.lastUsedAt);
+    if (dt && (!mt || dt > mt)) next.lastUsedAt = d.lastUsedAt;
+    return next;
   });
 }
 
@@ -644,14 +797,14 @@ function filterAndSortPrompts(prompts, opts) {
 
   items.sort(function (a, b) {
     if (a.favorite !== b.favorite) return a.favorite ? -1 : 1;
-    if (mode === "title") return a.title.localeCompare(b.title);
+    if (mode === "title") return asStr(a.title).localeCompare(asStr(b.title));
     if (mode === "category") {
-      var c = a.category.localeCompare(b.category);
-      return c !== 0 ? c : a.title.localeCompare(b.title);
+      var c = asStr(a.category).localeCompare(asStr(b.category));
+      return c !== 0 ? c : asStr(a.title).localeCompare(asStr(b.title));
     }
     if (mode === "uses") {
       var d = (b.useCount || 0) - (a.useCount || 0);
-      return d !== 0 ? d : a.title.localeCompare(b.title);
+      return d !== 0 ? d : asStr(a.title).localeCompare(asStr(b.title));
     }
     var at = a.lastUsedAt || a.updatedAt || a.createdAt || "";
     var bt = b.lastUsedAt || b.updatedAt || b.createdAt || "";
@@ -788,6 +941,7 @@ function previewText(content, maxLen) {
 var PvCore = {
   DATA_VERSION: DATA_VERSION,
   LIMITS: LIMITS,
+  STORE_LIMITS: STORE_LIMITS,
   ROW_CHROME_PX: ROW_CHROME_PX,
   PANEL: PANEL,
   DIALOG_CONTENT: DIALOG_CONTENT,
@@ -802,10 +956,20 @@ var PvCore = {
   extractTemplateVars: extractTemplateVars,
   applyTemplate: applyTemplate,
   sanitizePrompt: sanitizePrompt,
+  uniquifyPromptIds: uniquifyPromptIds,
+  sanitizePromptList: sanitizePromptList,
+  shouldSeedSamples: shouldSeedSamples,
+  countRecoverableVaultJson: countRecoverableVaultJson,
+  shouldTrapTab: shouldTrapTab,
   dedupeHotkeySlots: dedupeHotkeySlots,
   assignHotkeySlot: assignHotkeySlot,
   parsePromptsPayload: parsePromptsPayload,
   mergePromptsById: mergePromptsById,
+  mergeUsageFromDisk: mergeUsageFromDisk,
+  isSafePromptId: isSafePromptId,
+  isSafeTemplateVar: isSafeTemplateVar,
+  isUsableDataDirPath: isUsableDataDirPath,
+  exceedsStoreLimits: exceedsStoreLimits,
   clampPanelWidth: clampPanelWidth,
   clampListHeight: clampListHeight,
   innerContentWidth: innerContentWidth,

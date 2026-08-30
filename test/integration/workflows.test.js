@@ -180,13 +180,17 @@ describe("import / merge workflows", () => {
       ],
     };
     const raw = Core.parsePromptsPayload(payload);
-    const incoming = raw.map((r) => Core.sanitizePrompt(r, deps));
+    const incoming = Core.sanitizePromptList(raw, deps);
     Core.dedupeHotkeySlots(incoming, deps.now);
     assert.equal(incoming[0].hotkeySlot, 2);
     assert.equal(incoming[1].hotkeySlot, 0);
     assert.equal(incoming[2].title, "Untitled");
     assert.deepEqual(incoming[2].tags, ["x", "y"]);
     assert.deepEqual(Core.extractTemplateVars(incoming[0].content), ["x"]);
+  });
+
+  it("refuses an oversized import list", () => {
+    assert.equal(Core.exceedsStoreLimits(Core.STORE_LIMITS.maxPrompts + 1, 100), "prompts");
   });
 });
 

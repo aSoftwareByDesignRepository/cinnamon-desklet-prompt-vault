@@ -9,7 +9,7 @@ you reuse, find them instantly, and copy them to the clipboard with one click.
 
 - **Store prompts** with a title, category, tags, optional notes, and the text.
 - **Search** across title, category, tags, notes and text as you type.
-- **Filter** by category or by ★ favorites with one click.
+- **Filter** by category or by **Favorites** with one click.
 - **Copy** to the clipboard by clicking a prompt (or the copy button). A green
   flash and a status line confirm it.
 - **Always copy raw** (default) — prompts are copied exactly as stored. Turn off
@@ -22,9 +22,10 @@ you reuse, find them instantly, and copy them to the clipboard with one click.
 - **Favorites, duplicate, edit, delete** — edit opens a proper dialog; optional
   template fill stays inline when *Always copy raw* is off, with optional delete
   confirmation.
-- **Backup & restore** — export a timestamped JSON file; import by merge or full
-  replace; a rolling auto-backup is kept on every change so a save can never lose
-  your previous state.
+- **Backup & restore** — export a timestamped JSON file; import via a file picker
+  (zenity) or, if zenity is missing, `import.json` then the newest `*.json` in the
+  data folder. A rolling auto-backup is written on each change **when that
+  setting is on**. Auto-backup is optional; it is not a substitute for Export.
 - **Portable** — point the data folder at a synced location (Dropbox, Nextcloud,
   a git repo, a USB stick) to take your prompts anywhere.
 
@@ -48,7 +49,7 @@ reparented during resize, so they cannot vanish.
 
 | Shortcut | Action |
 | --- | --- |
-| `Tab` / `Shift+Tab` | Move to the next / previous field |
+| `Tab` / `Shift+Tab` | Move to the next / previous field (edit dialog and template fill). In the list search box, Tab is not trapped so focus can leave the desklet. |
 | `Ctrl+A` | Select all |
 | `Ctrl+C` / `Ctrl+X` | Copy / cut selection |
 | `Ctrl+V` / `Shift+Insert` | Paste from clipboard |
@@ -69,8 +70,9 @@ reparented during resize, so they cannot vanish.
 | `Super+Ctrl+1` … `Super+Ctrl+9` | Paste prompt assigned to that slot |
 
 Uses **Super+Ctrl** (not Super+Shift) to avoid conflicts with Cinnamon/Mint shortcuts
-such as Super+1–9 app switching. Requires **xdotool** on X11 (`sudo apt install xdotool`)
-or **wtype** / **ydotool** on Wayland. Re-run **Shortcuts** after every `./install.sh` update.
+such as Super+1–9 app switching. Auto-paste on X11 uses **python3-xlib** (usually
+already installed); **xdotool** is optional. On Wayland install **wtype** or **ydotool**.
+Re-run **Shortcuts** after every `./install.sh` update.
 
 Change bindings in **Settings → Keyboard → Custom Shortcuts** (entries named
 *Prompt Vault: Slot N*). Re-run **Shortcuts** after changing the data folder in
@@ -120,17 +122,23 @@ settings (a leading `~` is expanded to your home directory).
 
 ### Importing
 
-Place a JSON file named `import.json` in the data folder, then use
-**Import (merge)** or **Import (replace all)** from the toolbar or right-click
-menu. Accepted shapes:
+Click **Import (merge)** or **Import (replace all)** and pick a JSON file (zenity
+file picker). If zenity is not installed, the desklet looks for `import.json` in
+the data folder, then the newest `*.json` there. Accepted shapes:
 
 ```json
 { "version": 1, "prompts": [ { "title": "...", "content": "...", "category": "...", "tags": ["a","b"] } ] }
 ```
 
 …or simply a top-level array of prompt objects. Unknown/invalid fields are
-sanitized; an unreadable `prompts.json` is moved aside (never silently deleted)
-and the desklet starts fresh.
+sanitized; non-object rows are skipped. Duplicate ids in a file are uniquified
+(first keeps the id, later rows get a new id).
+
+If `prompts.json` is unreadable it is **moved aside** (never silently deleted)
+and the desklet shows an empty list — it does **not** write sample prompts over
+a recoverable vault. If `prompts.json` is missing but other JSON files remain
+in the folder (auto-backup, corrupt copy, export), samples are **not** seeded;
+use Import to restore. Samples are only written on a truly empty first run.
 
 ## Data model
 
@@ -159,7 +167,7 @@ Domain logic lives in `prompt-vault@alex/pv_core.js` (shared by the desklet and 
 npm install
 npm run test:coverage    # unit + integration, coverage gates on pv_core.js
 npm run test:python      # CLI slot/file helpers
-npm run test:mutation    # Stryker on pv_core.js (break threshold 80)
+npm run test:mutation    # Stryker on pv_core.js (break threshold 85)
 ```
 
 ## Uninstall

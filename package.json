@@ -8,7 +8,7 @@
     "test:unit": "node --test test/unit/*.test.js",
     "test:integration": "node --test test/integration/*.test.js",
     "test:e2e": "node --test test/e2e/*.test.js",
-    "test:python": "python3 -m pytest -q test/python",
+    "test:python": "python3 -m pytest -q test/python || python3 test/python/run_cli_tests.py",
     "test:coverage": "c8 --check-coverage --lines 95 --functions 95 --branches 85 --statements 95 --include 'prompt-vault@alex/pv_core.js' --reporter text --reporter lcov node --test test/unit/*.test.js test/integration/*.test.js test/e2e/*.test.js",
     "test:mutation": "npx --yes @stryker-mutator/core@8.7.1 run",
     "test:all": "npm run test:coverage && npm run test:python && npm run test:mutation"

@@ -67,13 +67,28 @@ let LIMITS = {
 };
 
 function _ensureCore(metadata) {
-  if (PvCore) return PvCore;
   if (!metadata || !metadata.path) throw new Error("Prompt Vault: missing metadata.path");
+  // GJS keeps imported modules across ReloadXlet. Drop the cached pv_core so
+  // new helpers (store limits, safe ids) exist after an update.
+  try {
+    delete imports.pv_core;
+  } catch (e) {
+    /* ignore */
+  }
   imports.searchPath.unshift(metadata.path);
   PvCore = imports.pv_core;
   DATA_VERSION = PvCore.DATA_VERSION;
   LIMITS = PvCore.LIMITS;
   return PvCore;
+}
+
+function _storeTooBig(promptCount, byteLength) {
+  if (PvCore && typeof PvCore.exceedsStoreLimits === "function") {
+    return PvCore.exceedsStoreLimits(promptCount, byteLength);
+  }
+  if (Number(promptCount) > 500) return "prompts";
+  if (Number(byteLength) > 5 * 1024 * 1024) return "bytes";
+  return null;
 }
 
 function _nowIso() {
@@ -204,8 +219,10 @@ class PromptEditDialog {
     this._viewportH = seed.viewportHeight;
 
     this._dialog = new ModalDialog.ModalDialog({ styleClass: "prompt-vault-edit-dialog" });
+    this._alive = true;
     desklet._trackDialog(this._dialog);
     this._dialog.connect("destroy", () => {
+      this._alive = false;
       desklet._editDialog = null;
     });
     this._build();
@@ -380,6 +397,8 @@ class PromptEditDialog {
         if (this._errorLabel.visible) this._setError("");
       });
       entry.clutter_text.connect("key-press-event", (actor, event) => {
+        const clipHandled = _handleClipboardKeyPress(entry, event);
+        if (clipHandled === Clutter.EVENT_STOP) return clipHandled;
         const mods = Cinnamon.get_event_state(event);
         if (
           (mods & Clutter.ModifierType.CONTROL_MASK) &&
@@ -391,6 +410,15 @@ class PromptEditDialog {
         }
         return Clutter.EVENT_PROPAGATE;
       });
+      const onMiddlePaste = (_a, event) => {
+        if (event && event.get_button() === 2) {
+          _pasteIntoEntry(entry, St.ClipboardType.PRIMARY);
+          return Clutter.EVENT_STOP;
+        }
+        return Clutter.EVENT_PROPAGATE;
+      };
+      entry.connect("button-press-event", onMiddlePaste);
+      entry.clutter_text.connect("button-press-event", onMiddlePaste);
     }
 
     this._dialog.setButtons([
@@ -416,7 +444,7 @@ class PromptEditDialog {
 
   _scheduleContentLayoutSync() {
     const run = () => {
-      if (!this._contentEntry) return GLib.SOURCE_REMOVE;
+      if (!this._alive || !this._contentEntry) return GLib.SOURCE_REMOVE;
       this._syncContentLayout();
       return GLib.SOURCE_REMOVE;
     };
@@ -576,6 +604,7 @@ class PromptEditDialog {
       this._scrollInner.queue_relayout();
       this._scroll.queue_relayout();
       Mainloop.timeout_add(50, () => {
+        if (!this._alive) return GLib.SOURCE_REMOVE;
         this._finalizeScrollAdjustment(m);
         return GLib.SOURCE_REMOVE;
       });
@@ -596,13 +625,13 @@ class PromptEditDialog {
 
   _save() {
     const title = this._titleEntry.get_text().trim();
-    const content = this._contentEntry.get_text().trim();
+    const contentRaw = this._contentEntry.get_text();
     if (!title) {
       this._setError(_("Please enter a title."));
       this._titleEntry.clutter_text.grab_key_focus();
       return;
     }
-    if (!content) {
+    if (!contentRaw.trim()) {
       this._setError(_("Please enter the prompt text."));
       this._contentEntry.clutter_text.grab_key_focus();
       return;
@@ -612,9 +641,9 @@ class PromptEditDialog {
       this._desklet._commitPrompt(this._existing, {
         title: _clampStr(title, LIMITS.title),
         category: _clampStr(this._categoryEntry.get_text().trim() || "General", LIMITS.category),
-        content: _clampStr(content, LIMITS.content),
+        content: _clampStr(contentRaw, LIMITS.content),
         tags: _normalizeTags(this._tagsEntry.get_text()),
-        notes: _clampStr(this._notesEntry.get_text().trim(), LIMITS.notes),
+        notes: _clampStr(this._notesEntry.get_text(), LIMITS.notes),
         hotkeySlot: this._selectedSlot,
       })
     ) {
@@ -706,6 +735,129 @@ function _deleteEntrySelection(entry) {
   ct.set_selection_bound(start);
 }
 
+function _eventHasCtrl(event) {
+  try {
+    if (Cinnamon.get_event_state(event) & Clutter.ModifierType.CONTROL_MASK) return true;
+  } catch (e) {
+    /* ignore */
+  }
+  try {
+    if (typeof event.has_control_modifier === "function" && event.has_control_modifier()) return true;
+  } catch (e2) {
+    /* ignore */
+  }
+  return false;
+}
+
+function _eventHasShift(event) {
+  try {
+    if (Cinnamon.get_event_state(event) & Clutter.ModifierType.SHIFT_MASK) return true;
+  } catch (e) {
+    /* ignore */
+  }
+  try {
+    if (typeof event.has_shift_modifier === "function" && event.has_shift_modifier()) return true;
+  } catch (e2) {
+    /* ignore */
+  }
+  return false;
+}
+
+function _isLetterKey(symbol, letter) {
+  const lower = letter.toLowerCase();
+  const upper = lower.toUpperCase();
+  const keyLower = Clutter[`KEY_${lower}`];
+  const keyUpper = Clutter[`KEY_${upper}`];
+  if (symbol === keyLower || symbol === keyUpper) return true;
+  // Some X11/Clutter paths report Ctrl+letter as ASCII 1–26.
+  return symbol === lower.charCodeAt(0) - 96;
+}
+
+function _setClipboardText(text) {
+  const clip = St.Clipboard.get_default();
+  const value = text == null ? "" : String(text);
+  clip.set_text(St.ClipboardType.CLIPBOARD, value);
+  try {
+    clip.set_text(St.ClipboardType.PRIMARY, value);
+  } catch (e) {
+    /* PRIMARY is X11-only */
+  }
+}
+
+function _pasteIntoEntry(entry, type) {
+  const clip = St.Clipboard.get_default();
+  clip.get_text(type, (_c, text) => {
+    try {
+      if (text) {
+        _insertTextAtCursor(entry, text);
+        return;
+      }
+      if (type === St.ClipboardType.CLIPBOARD) {
+        clip.get_text(St.ClipboardType.PRIMARY, (_c2, text2) => {
+          try {
+            if (text2) _insertTextAtCursor(entry, text2);
+          } catch (e) {
+            /* entry destroyed */
+          }
+        });
+      }
+    } catch (e) {
+      /* entry destroyed */
+    }
+  });
+}
+
+function _handleClipboardKeyPress(entry, event) {
+  const symbol = event.get_key_symbol();
+  const shift = _eventHasShift(event);
+  // ASCII 1–26 means Ctrl+letter even when CONTROL_MASK is missing.
+  const ctrl = _eventHasCtrl(event) || (symbol >= 1 && symbol <= 26);
+
+  if (shift && symbol === Clutter.KEY_Insert) {
+    _pasteIntoEntry(entry, St.ClipboardType.CLIPBOARD);
+    return Clutter.EVENT_STOP;
+  }
+
+  if (!ctrl) return Clutter.EVENT_PROPAGATE;
+
+  const ct = entry.clutter_text;
+  const len = _entryTextLength(entry);
+
+  if (_isLetterKey(symbol, "a")) {
+    if (len > 0) {
+      ct.set_selection(0, len);
+      ct.set_cursor_position(len);
+    }
+    return Clutter.EVENT_STOP;
+  }
+
+  if (_isLetterKey(symbol, "c") || symbol === Clutter.KEY_Insert) {
+    const sel = _getEntrySelection(entry);
+    if (sel) {
+      _setClipboardText(sel);
+      return Clutter.EVENT_STOP;
+    }
+    return Clutter.EVENT_PROPAGATE;
+  }
+
+  if (_isLetterKey(symbol, "x")) {
+    const sel = _getEntrySelection(entry);
+    if (sel) {
+      _setClipboardText(sel);
+      _deleteEntrySelection(entry);
+      return Clutter.EVENT_STOP;
+    }
+    return Clutter.EVENT_PROPAGATE;
+  }
+
+  if (_isLetterKey(symbol, "v")) {
+    _pasteIntoEntry(entry, St.ClipboardType.CLIPBOARD);
+    return Clutter.EVENT_STOP;
+  }
+
+  return Clutter.EVENT_PROPAGATE;
+}
+
 class PromptVaultDesklet extends Desklet.Desklet {
   constructor(metadata, deskletId) {
     super(metadata, deskletId);
@@ -714,6 +866,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
     this._destroyed = false;
     this._prompts = [];
     this._searchQuery = "";
+    this._searchDebounceId = 0;
     this._categoryFilter = "all";
     this._favoritesOnly = false;
     this._statusTimeoutId = 0;
@@ -778,16 +931,21 @@ class PromptVaultDesklet extends Desklet.Desklet {
   // -- Paths & storage ------------------------------------------------------
 
   _getDataDir() {
+    const fallback = GLib.build_filenamev([GLib.get_home_dir(), ".local", "share", ...DEFAULT_DATA_SUBDIR]);
     const custom = _asStr(this.data_dir).trim();
-    if (custom) {
-      // Expand a leading ~ for convenience.
-      if (custom === "~") return GLib.get_home_dir();
-      if (custom.startsWith("~/")) {
-        return GLib.build_filenamev([GLib.get_home_dir(), custom.slice(2)]);
-      }
-      return custom;
+    if (!custom) return fallback;
+    if (typeof PvCore.isUsableDataDirPath === "function" && !PvCore.isUsableDataDirPath(custom)) {
+      return fallback;
     }
-    return GLib.build_filenamev([GLib.get_home_dir(), ".local", "share", ...DEFAULT_DATA_SUBDIR]);
+    if (custom === "~") return GLib.get_home_dir();
+    if (custom.startsWith("~/")) {
+      const expanded = GLib.build_filenamev([GLib.get_home_dir(), custom.slice(2)]);
+      if (typeof PvCore.isUsableDataDirPath === "function" && !PvCore.isUsableDataDirPath(expanded)) {
+        return fallback;
+      }
+      return expanded;
+    }
+    return custom;
   }
 
   _getPromptsPath() {
@@ -822,18 +980,6 @@ class PromptVaultDesklet extends Desklet.Desklet {
       /* ignore */
     }
     return null;
-  }
-
-  _spawnEnvPatch(patch) {
-    const env = GLib.get_environ();
-    const out = env.slice();
-    for (const [key, value] of Object.entries(patch)) {
-      const entry = `${key}=${value}`;
-      const idx = out.findIndex((pair) => pair.startsWith(`${key}=`));
-      if (idx >= 0) out[idx] = entry;
-      else out.push(entry);
-    }
-    return out;
   }
 
   _dedupeHotkeySlots() {
@@ -881,15 +1027,37 @@ class PromptVaultDesklet extends Desklet.Desklet {
 
   _writeFile(path, contents, secure) {
     const file = Gio.File.new_for_path(path);
-    file.replace_contents(
-      contents,
-      null,
-      false,
-      Gio.FileCreateFlags.REPLACE_DESTINATION,
-      null
-    );
+    let flags = Gio.FileCreateFlags.REPLACE_DESTINATION;
+    try {
+      if (Gio.FileCreateFlags.PRIVATE) flags |= Gio.FileCreateFlags.PRIVATE;
+    } catch (e) {
+      /* older Gio */
+    }
+    file.replace_contents(contents, null, false, flags, null);
     if (secure) this._setMode(file, 0o600);
     return file;
+  }
+
+  _queryRegularFile(path) {
+    const file = Gio.File.new_for_path(path);
+    if (!file.query_exists(null)) return null;
+    const info = file.query_info(
+      "standard::type,standard::size",
+      Gio.FileQueryInfoFlags.NONE,
+      null
+    );
+    if (info.get_file_type() !== Gio.FileType.REGULAR) return null;
+    return { file, size: info.get_size() };
+  }
+
+  _readJsonFile(path) {
+    const meta = this._queryRegularFile(path);
+    if (!meta) throw new Error("not a regular file");
+    if (_storeTooBig(0, meta.size)) throw new Error("file too large");
+    const [ok, contents] = meta.file.load_contents(null);
+    if (!ok) throw new Error("file could not be read");
+    if (_storeTooBig(0, contents.length)) throw new Error("file too large");
+    return JSON.parse(_decode(contents));
   }
 
   _loadData() {
@@ -898,23 +1066,48 @@ class PromptVaultDesklet extends Desklet.Desklet {
     const file = Gio.File.new_for_path(path);
 
     if (!file.query_exists(null)) {
+      const names = this._listJsonCandidates().map((f) => f.name);
+      const siblingCount =
+        typeof PvCore.countRecoverableVaultJson === "function"
+          ? PvCore.countRecoverableVaultJson(names)
+          : names.filter((n) => n && n !== "prompts.json").length;
+      const seed =
+        typeof PvCore.shouldSeedSamples === "function"
+          ? PvCore.shouldSeedSamples(false, siblingCount)
+          : siblingCount === 0;
+      if (!seed) {
+        this._prompts = [];
+        this._setStatus(
+          _("prompts.json is missing. Use Import to restore a backup — sample prompts were not loaded.")
+        );
+        return;
+      }
       this._prompts = _samplePrompts();
       this._saveData({ backup: false });
       return;
     }
 
     try {
-      const [ok, contents] = file.load_contents(null);
-      if (!ok) throw new Error("file could not be read");
-      const parsed = JSON.parse(_decode(contents));
+      const parsed = this._readJsonFile(path);
       const list = PvCore.parsePromptsPayload(parsed);
       if (!list) throw new Error("unexpected data format");
-      this._prompts = list.map(_sanitizePrompt);
+      if (_storeTooBig(list.length, 0)) throw new Error("too many prompts");
+      this._prompts =
+        typeof PvCore.sanitizePromptList === "function"
+          ? PvCore.sanitizePromptList(list, _coreDeps())
+          : list.map(_sanitizePrompt);
       this._dedupeHotkeySlots();
     } catch (e) {
-      this._quarantineFile(path, e);
-      this._prompts = _samplePrompts();
-      this._saveData({ backup: false });
+      const quarantined = this._quarantineFile(path, e);
+      this._prompts = [];
+      if (quarantined) {
+        Main.notifyError(
+          _("Prompt Vault"),
+          _("Your prompts file was unreadable and has been set aside. Nothing was overwritten.")
+        );
+      } else {
+        this._setStatus(_("Could not read prompts.json — the file was not overwritten."), true);
+      }
     }
   }
 
@@ -929,16 +1122,40 @@ class PromptVaultDesklet extends Desklet.Desklet {
         null
       );
       global.logWarning(`[Prompt Vault] Unreadable data file moved to ${dest}: ${error}`);
-      Main.notifyError(
-        _("Prompt Vault"),
-        _("Your prompts file was unreadable and has been set aside. Starting fresh.")
-      );
+      return dest;
     } catch (e) {
       global.logError(`[Prompt Vault] Could not quarantine corrupt file: ${e}`);
+      return null;
+    }
+  }
+
+  _acquireDataLock() {
+    const dir = GLib.build_filenamev([this._getDataDir(), "prompts.json.lockdir"]);
+    const file = Gio.File.new_for_path(dir);
+    const deadline = GLib.get_monotonic_time() + 5 * 1000 * 1000;
+    while (GLib.get_monotonic_time() < deadline) {
+      try {
+        file.make_directory(null);
+        return dir;
+      } catch (e) {
+        GLib.usleep(25000);
+      }
+    }
+    global.logWarning("[Prompt Vault] Could not acquire data lock; saving anyway");
+    return null;
+  }
+
+  _releaseDataLock(dir) {
+    if (!dir) return;
+    try {
+      Gio.File.new_for_path(dir).delete(null);
+    } catch (e) {
+      /* already gone */
     }
   }
 
   _saveData({ backup = false } = {}) {
+    const lockDir = this._acquireDataLock();
     try {
       this._ensureDataDir();
       const path = this._getPromptsPath();
@@ -958,6 +1175,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
         }
       }
 
+      this._mergeUsageFromDiskFile(path);
       this._writeFile(path, this._serialize(), true);
       return true;
     } catch (e) {
@@ -965,6 +1183,26 @@ class PromptVaultDesklet extends Desklet.Desklet {
       this._setStatus(_("Could not save changes."), true);
       Main.notifyError(_("Prompt Vault"), _("Failed to save prompts: ") + e.message);
       return false;
+    } finally {
+      this._releaseDataLock(lockDir);
+    }
+  }
+
+  _mergeUsageFromDiskFile(path) {
+    try {
+      if (!GLib.file_test(path, GLib.FileTest.IS_REGULAR)) return;
+      const parsed = this._readJsonFile(path);
+      const list = PvCore.parsePromptsPayload(parsed);
+      if (!list) return;
+      if (typeof PvCore.mergeUsageFromDisk === "function") {
+        const diskPrompts =
+          typeof PvCore.sanitizePromptList === "function"
+            ? PvCore.sanitizePromptList(list, _coreDeps())
+            : list.map(_sanitizePrompt);
+        this._prompts = PvCore.mergeUsageFromDisk(this._prompts, diskPrompts);
+      }
+    } catch (e) {
+      /* disk unreadable or raced — keep in-memory state */
     }
   }
 
@@ -993,6 +1231,13 @@ class PromptVaultDesklet extends Desklet.Desklet {
     this._headerRow.add(this._countBadge, { expand: false, y_fill: false, y_align: St.Align.MIDDLE });
     this._root.add(this._headerRow, { x_fill: true });
 
+    this._howto = new St.Label({
+      text: _("Click a prompt to copy it. Paste with Ctrl+V."),
+      style_class: "prompt-vault-howto",
+    });
+    this._howto.clutter_text.line_wrap = true;
+    this._root.add(this._howto, { x_fill: true });
+
     // ---- List view --------------------------------------------------------
     this._listPanel = new St.BoxLayout({ vertical: true, style_class: "prompt-vault-list-panel" });
 
@@ -1003,8 +1248,18 @@ class PromptVaultDesklet extends Desklet.Desklet {
       can_focus: true,
     });
     this._searchEntry.clutter_text.connect("text-changed", () => {
-      this._searchQuery = this._searchEntry.get_text().trim().toLowerCase();
-      this._renderList();
+      const raw = this._searchEntry.get_text();
+      if (this._searchDebounceId) {
+        Mainloop.source_remove(this._searchDebounceId);
+        this._timeouts.delete(this._searchDebounceId);
+        this._searchDebounceId = 0;
+      }
+      this._searchDebounceId = this._addTimeout(70, () => {
+        this._searchDebounceId = 0;
+        this._searchQuery = (raw || "").trim().toLowerCase();
+        this._renderList();
+        return GLib.SOURCE_REMOVE;
+      });
     });
     this._wireDeskletEntry(this._searchEntry);
     searchRow.add(this._searchEntry, { expand: true, x_fill: true });
@@ -1085,6 +1340,13 @@ class PromptVaultDesklet extends Desklet.Desklet {
       import: _("Import"),
       folder: _("Data folder"),
     };
+    this._toolbarTips = {
+      add: _("Create a new prompt"),
+      shortcuts: _("Turn on Super+Ctrl+1–9 to paste into any app"),
+      export: _("Save a backup copy of all prompts"),
+      import: _("Add prompts from a backup file"),
+      folder: _("Open the folder where prompts are stored"),
+    };
     this._toolbarHandlers = {
       add: () => this._openEditor(null),
       shortcuts: () => this._setupKeyboardShortcuts(),
@@ -1148,7 +1410,8 @@ class PromptVaultDesklet extends Desklet.Desklet {
           btnSpec.icon,
           this._toolbarLabels[btnSpec.id] || btnSpec.id,
           this._toolbarHandlers[btnSpec.id] || (() => {}),
-          extra
+          extra,
+          this._toolbarTips[btnSpec.id] || this._toolbarLabels[btnSpec.id]
         );
         this._toolbarById[btnSpec.id] = btn;
       }
@@ -1236,6 +1499,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
 
     this._listPanel.show();
     if (this._toolbar) this._toolbar.show();
+    if (this._howto) this._howto.show();
     this._templatePanel.hide();
     this._backBtn.hide();
     this._headerLabel.text = _("Prompt Vault");
@@ -1250,6 +1514,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
 
     this._listPanel.hide();
     if (this._toolbar) this._toolbar.hide();
+    if (this._howto) this._howto.hide();
     this._templatePanel.show();
     this._backBtn.show();
     this._headerLabel.text = _("Fill placeholders");
@@ -1578,9 +1843,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
 
   _handleEntryKeyPress(entry, event) {
     const symbol = event.get_key_symbol();
-    const mods = Cinnamon.get_event_state(event);
-    const ctrl = (mods & Clutter.ModifierType.CONTROL_MASK) !== 0;
-    const shift = (mods & Clutter.ModifierType.SHIFT_MASK) !== 0;
+    const shift = _eventHasShift(event);
 
     if (symbol === Clutter.KEY_Escape) {
       this._onEscape(entry);
@@ -1590,56 +1853,21 @@ class PromptVaultDesklet extends Desklet.Desklet {
     // Tab navigation between fields (multiline content included — accessibility
     // beats inserting a literal tab character here).
     if (symbol === Clutter.KEY_Tab || symbol === Clutter.KEY_ISO_Left_Tab) {
+      const chain = this._focusChain();
+      const trap =
+        typeof PvCore.shouldTrapTab === "function"
+          ? PvCore.shouldTrapTab(chain.length)
+          : chain.length > 0;
+      if (!trap) return Clutter.EVENT_PROPAGATE;
       this._moveFieldFocus(entry, shift || symbol === Clutter.KEY_ISO_Left_Tab ? -1 : 1);
       return Clutter.EVENT_STOP;
     }
 
-    if (!ctrl) return Clutter.EVENT_PROPAGATE;
-
-    const ct = entry.clutter_text;
-    const len = _entryTextLength(entry);
-
-    // Desklet entries do not get the shell's default clipboard bindings, so we
-    // implement select-all / copy / cut / paste explicitly and reliably.
-    if (symbol === Clutter.KEY_a || symbol === Clutter.KEY_A) {
-      if (len > 0) {
-        ct.set_selection(0, len);
-        ct.set_cursor_position(len);
-      }
-      return Clutter.EVENT_STOP;
-    }
-
-    if (symbol === Clutter.KEY_c || symbol === Clutter.KEY_C) {
-      const sel = _getEntrySelection(entry);
-      if (sel) {
-        St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, sel);
-        return Clutter.EVENT_STOP;
-      }
-      return Clutter.EVENT_PROPAGATE;
-    }
-
-    if (symbol === Clutter.KEY_x || symbol === Clutter.KEY_X) {
-      const sel = _getEntrySelection(entry);
-      if (sel) {
-        St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, sel);
-        _deleteEntrySelection(entry);
-        return Clutter.EVENT_STOP;
-      }
-      return Clutter.EVENT_PROPAGATE;
-    }
-
-    if (symbol === Clutter.KEY_v || symbol === Clutter.KEY_V) {
-      this._pasteClipboard(entry, St.ClipboardType.CLIPBOARD);
-      return Clutter.EVENT_STOP;
-    }
-
-    return Clutter.EVENT_PROPAGATE;
+    return _handleClipboardKeyPress(entry, event);
   }
 
   _pasteClipboard(entry, target) {
-    St.Clipboard.get_default().get_text(target, (clip, text) => {
-      if (text && !this._destroyed) _insertTextAtCursor(entry, text);
-    });
+    _pasteIntoEntry(entry, target);
   }
 
   _wireDeskletEntry(entry) {
@@ -1687,17 +1915,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
       this._lastFocusedEntry = entry;
     });
 
-    ct.connect("key-press-event", (actor, event) => {
-      const symbol = event.get_key_symbol();
-      const mods = Cinnamon.get_event_state(event);
-      const shift = (mods & Clutter.ModifierType.SHIFT_MASK) !== 0;
-      // Shift+Insert paste (common accessibility shortcut).
-      if (shift && symbol === Clutter.KEY_Insert) {
-        this._pasteClipboard(entry, St.ClipboardType.CLIPBOARD);
-        return Clutter.EVENT_STOP;
-      }
-      return this._handleEntryKeyPress(entry, event);
-    });
+    ct.connect("key-press-event", (actor, event) => this._handleEntryKeyPress(entry, event));
   }
 
   _a11y(actor, name) {
@@ -1719,7 +1937,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
       child: new St.Icon({
         icon_name: iconName,
         icon_type: St.IconType.SYMBOLIC,
-        icon_size: 16,
+        icon_size: 18,
       }),
     });
     if (tooltip) {
@@ -1730,7 +1948,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
     return btn;
   }
 
-  _mkTextBtn(parent, iconName, label, onClick, extraClass) {
+  _mkTextBtn(parent, iconName, label, onClick, extraClass, tooltip) {
     const box = new St.BoxLayout({ vertical: false, style_class: "prompt-vault-toolbar-btn-inner" });
     box.add(
       new St.Icon({ icon_name: iconName, icon_type: St.IconType.SYMBOLIC, icon_size: 16 }),
@@ -1749,8 +1967,9 @@ class PromptVaultDesklet extends Desklet.Desklet {
       child: box,
       x_expand: true,
     });
-    this._a11y(btn, label);
-    new Tooltips.Tooltip(btn, label);
+    const tip = tooltip || label;
+    this._a11y(btn, tip);
+    new Tooltips.Tooltip(btn, tip);
     btn.connect("clicked", () => onClick());
     if (parent) parent.add(btn, { expand: true, x_fill: true });
     return btn;
@@ -1972,7 +2191,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
 
     const favCount = this._prompts.filter((p) => p.favorite).length;
     this._mkFilterChip(
-      "★ " + _("Favorites") + (favCount ? " (" + favCount + ")" : ""),
+      _("Favorites") + (favCount ? " (" + favCount + ")" : ""),
       { type: "favorites" },
       "prompt-vault-chip-fav"
     );
@@ -2175,9 +2394,9 @@ class PromptVaultDesklet extends Desklet.Desklet {
     }
     body.add(chips, { x_fill: true, expand: false });
 
-    const copyTip = prompt.title + "\n" + _("Click to copy");
-    this._a11y(body, _("Copy") + ": " + prompt.title);
-    new Tooltips.Tooltip(body, copyTip);
+    const copyTip = _("Copy") + ": " + prompt.title;
+    this._a11y(body, copyTip);
+    new Tooltips.Tooltip(body, _("Click the prompt or Copy to put it on the clipboard"));
     const doCopy = () => this._copyPrompt(prompt, row);
     body.connect("button-press-event", (_a, event) => {
       if (event.get_button() !== 1) return Clutter.EVENT_PROPAGATE;
@@ -2195,9 +2414,15 @@ class PromptVaultDesklet extends Desklet.Desklet {
     row.add(body, { expand: true, x_fill: true });
 
     const actions = new St.BoxLayout({ vertical: false, style_class: "prompt-vault-actions" });
-    actions.add(
-      this._mkIconBtn("edit-copy-symbolic", copyTip, () => this._copyPrompt(prompt, row))
+    const copyBtn = this._mkTextBtn(
+      null,
+      "edit-copy-symbolic",
+      _("Copy"),
+      () => this._copyPrompt(prompt, row),
+      "prompt-vault-row-copy",
+      copyTip
     );
+    actions.add(copyBtn, { expand: false, y_fill: false, y_align: St.Align.START });
     const moreBtn = this._mkIconBtn("open-menu-symbolic", _("More actions"), () => {
       this._openRowMoreMenu(moreBtn, prompt, row);
     });
@@ -2297,8 +2522,12 @@ class PromptVaultDesklet extends Desklet.Desklet {
   }
 
   _doCopy(text, prompt, row) {
+    if (!text || !String(text).trim()) {
+      this._setStatus(_("This prompt has no text to copy."), true);
+      return;
+    }
     try {
-      St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, text);
+      _setClipboardText(text);
     } catch (e) {
       this._setStatus(_("Could not access the clipboard."), true);
       return;
@@ -2445,25 +2674,115 @@ class PromptVaultDesklet extends Desklet.Desklet {
     }
   }
 
-  _importBackup(replace) {
-    let file, parsed;
+  _listJsonCandidates() {
+    const dirPath = this._getDataDir();
+    const dir = Gio.File.new_for_path(dirPath);
+    const found = [];
     try {
-      this._ensureDataDir();
-      const importPath = this._getImportPath();
-      file = Gio.File.new_for_path(importPath);
-      if (!file.query_exists(null)) {
-        this._setStatus(_("No import.json found in the data folder."), true);
-        Main.notify(
-          _("Prompt Vault"),
-          _("To import, place your backup at:") + "\n" + importPath + "\n" + _("then choose Import again.")
-        );
+      const enumerator = dir.enumerate_children(
+        "standard::name,time::modified",
+        Gio.FileQueryInfoFlags.NONE,
+        null
+      );
+      let info;
+      while ((info = enumerator.next_file(null))) {
+        const name = info.get_name();
+        if (!name || !name.toLowerCase().endsWith(".json")) continue;
+        if (name === "prompts.json.lock") continue;
+        found.push({
+          name,
+          path: dir.get_child(name).get_path(),
+          mtime: info.get_attribute_uint64("time::modified"),
+        });
+      }
+    } catch (e) {
+      return [];
+    }
+    found.sort((a, b) => {
+      if (a.name === "import.json" && b.name !== "import.json") return -1;
+      if (b.name === "import.json" && a.name !== "import.json") return 1;
+      return (b.mtime || 0) - (a.mtime || 0);
+    });
+    return found;
+  }
+
+  _fallbackImportPath() {
+    const preferred = this._getImportPath();
+    if (GLib.file_test(preferred, GLib.FileTest.IS_REGULAR)) return preferred;
+    const files = this._listJsonCandidates();
+    if (!files.length) return null;
+    return files[0].path;
+  }
+
+  _chooseImportFile(callback) {
+    const dir = this._ensureDataDir();
+    const zenity = GLib.find_program_in_path("zenity");
+    if (!zenity) {
+      callback(this._fallbackImportPath());
+      return;
+    }
+    try {
+      const proc = Gio.Subprocess.new(
+        [
+          zenity,
+          "--file-selection",
+          "--title=" + _("Import Prompt Vault JSON"),
+          "--filename=" + dir + "/",
+          "--file-filter=JSON | *.json",
+        ],
+        Gio.SubprocessFlags.STDOUT_PIPE
+      );
+      this._importProc = proc;
+      proc.communicate_utf8_async(null, null, (p, res) => {
+        this._importProc = null;
+        if (this._destroyed) return;
+        let path = "";
+        try {
+          const [, out] = p.communicate_utf8_finish(res);
+          path = (out || "").trim();
+        } catch (e) {
+          path = "";
+        }
+        if (path.indexOf("\0") !== -1) path = "";
+        callback(path || this._fallbackImportPath());
+      });
+    } catch (e) {
+      callback(this._fallbackImportPath());
+    }
+  }
+
+  _importBackup(replace) {
+    this._chooseImportFile((importPath) => this._importFromPath(importPath, replace));
+  }
+
+  _importFromPath(importPath, replace) {
+    if (this._destroyed) return;
+    if (!importPath || String(importPath).indexOf("\0") !== -1) {
+      const dir = this._getDataDir();
+      this._setStatus(_("No JSON file to import."), true);
+      Main.notify(
+        _("Prompt Vault"),
+        _("Put a backup in the data folder and click Import, then pick the file.") +
+          "\n" +
+          dir
+      );
+      return;
+    }
+
+    let parsed;
+    try {
+      if (!GLib.file_test(importPath, GLib.FileTest.IS_REGULAR)) {
+        this._setStatus(_("Import file not found."), true);
         return;
       }
-      const [ok, contents] = file.load_contents(null);
-      if (!ok) throw new Error("could not read import.json");
-      parsed = JSON.parse(_decode(contents));
+      parsed = this._readJsonFile(importPath);
     } catch (e) {
       global.logError(`[Prompt Vault] Import read failed: ${e}`);
+      const msg = String(e && e.message ? e.message : e);
+      if (msg.indexOf("too large") !== -1) {
+        this._setStatus(_("Import failed: file is too large."), true);
+        return;
+      }
       this._setStatus(_("Import failed: file is not valid JSON."), true);
       return;
     }
@@ -2473,25 +2792,37 @@ class PromptVaultDesklet extends Desklet.Desklet {
       this._setStatus(_("Import failed: no prompts found in the file."), true);
       return;
     }
-    const incoming = rawList.map(_sanitizePrompt);
+    if (_storeTooBig(rawList.length, 0)) {
+      this._setStatus(_("Import failed: too many prompts in the file."), true);
+      return;
+    }
+    const incoming =
+      typeof PvCore.sanitizePromptList === "function"
+        ? PvCore.sanitizePromptList(rawList, _coreDeps())
+        : rawList.filter(_isPlainObject).map(_sanitizePrompt);
+    const fileName = importPath.split("/").pop() || importPath;
 
     const apply = () => {
-      if (replace) {
-        this._prompts = incoming;
-      } else {
-        this._prompts = PvCore.mergePromptsById(this._prompts, incoming);
+      if (this._destroyed) return;
+      const next = replace ? incoming : PvCore.mergePromptsById(this._prompts, incoming);
+      if (_storeTooBig(next.length, 0)) {
+        this._setStatus(_("Import failed: that would exceed the prompt limit."), true);
+        return;
       }
+      this._prompts = next;
       this._dedupeHotkeySlots();
       if (this._saveData({ backup: true })) {
         this._applyDefaultFilter();
         this._renderList();
-        this._setStatus(`${_("Imported")} ${incoming.length} ${_("prompt(s).")}`);
+        this._setStatus(`${_("Imported")} ${incoming.length} ${_("prompt(s) from")} ${fileName}`);
       }
     };
 
     if (replace) {
       const dialog = new ModalDialog.ConfirmDialog(
-        _("Replace ALL current prompts with the contents of import.json?") +
+        _("Replace ALL current prompts with this file?") +
+          "\n" +
+          fileName +
           "\n\n" +
           `${this._prompts.length} → ${incoming.length} ${_("prompt(s).")}`,
         () => apply()
@@ -2536,15 +2867,49 @@ class PromptVaultDesklet extends Desklet.Desklet {
       envPatch.PROMPT_VAULT_DATA_DIR = dataDir;
     }
 
+    let launcher;
+    let proc;
     try {
-      GLib.spawn_async(
-        null,
-        [setupPath],
-        this._spawnEnvPatch(envPatch),
-        GLib.SpawnFlags.SEARCH_PATH | GLib.SpawnFlags.DO_NOT_REAP_CHILD,
-        null,
-        null
+      launcher = Gio.SubprocessLauncher.new(
+        Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
       );
+      for (const [key, value] of Object.entries(envPatch)) {
+        launcher.setenv(key, value, true);
+      }
+      proc = launcher.spawnv([setupPath]);
+    } catch (e) {
+      global.logError(`[Prompt Vault] Shortcut setup failed: ${e}`);
+      this._setStatus(_("Could not install keyboard shortcuts."), true);
+      return;
+    }
+
+    proc.communicate_utf8_async(null, null, (p, res) => {
+      if (this._destroyed) return;
+      let stdout = "";
+      let stderr = "";
+      let ok = false;
+      try {
+        const result = p.communicate_utf8_finish(res);
+        if (result.length >= 3) {
+          stdout = result[1] || "";
+          stderr = result[2] || "";
+        } else {
+          stdout = result[0] || "";
+          stderr = result[1] || "";
+        }
+        ok = typeof p.get_successful === "function" ? p.get_successful() : p.get_exit_status() === 0;
+      } catch (e) {
+        global.logError(`[Prompt Vault] Shortcut setup failed: ${e}`);
+        this._setStatus(_("Could not install keyboard shortcuts."), true);
+        return;
+      }
+      if (!ok) {
+        const detail = (stderr || stdout || "").trim().slice(0, 240);
+        global.logError(`[Prompt Vault] Shortcut setup failed: ${detail || "non-zero exit"}`);
+        this._setStatus(_("Could not install keyboard shortcuts."), true);
+        if (detail) Main.notify(_("Prompt Vault"), detail);
+        return;
+      }
       const assigned = this._prompts.filter((p) => p.hotkeySlot).length;
       const combo = HOTKEY_COMBO_LABEL + "1–9";
       const hint =
@@ -2553,10 +2918,7 @@ class PromptVaultDesklet extends Desklet.Desklet {
           : _("Shortcuts registered. Edit a prompt and pick slot 1–9.");
       this._setStatus(_("Keyboard shortcuts installed.") + " " + hint);
       Main.notify(_("Prompt Vault"), _("Global shortcuts installed:") + " " + combo);
-    } catch (e) {
-      global.logError(`[Prompt Vault] Shortcut setup failed: ${e}`);
-      this._setStatus(_("Could not install keyboard shortcuts."), true);
-    }
+    });
   }
 
   // -- Context menu ---------------------------------------------------------
@@ -2585,6 +2947,24 @@ class PromptVaultDesklet extends Desklet.Desklet {
     this._destroyed = true;
     this._closeRowMenu();
     this._releaseGrab();
+
+    if (this._importProc) {
+      try {
+        this._importProc.force_exit();
+      } catch (e) {
+        /* ignore */
+      }
+      this._importProc = null;
+    }
+
+    if (this._searchDebounceId) {
+      try {
+        Mainloop.source_remove(this._searchDebounceId);
+      } catch (e) {
+        /* ignore */
+      }
+      this._searchDebounceId = 0;
+    }
 
     if (this._statusTimeoutId) {
       Mainloop.source_remove(this._statusTimeoutId);

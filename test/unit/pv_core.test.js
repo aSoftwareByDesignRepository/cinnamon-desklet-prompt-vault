@@ -120,6 +120,207 @@ describe("tags + templates", () => {
     const vars = Core.extractTemplateVars(parts.join(" "));
     assert.equal(vars.length, Core.LIMITS.templateVars);
   });
+
+  it("does not leak lastIndex after a capped extract (apply still substitutes)", () => {
+    const parts = [];
+    for (let i = 0; i < Core.LIMITS.templateVars + 8; i++) parts.push(`{{v${i}}}`);
+    Core.extractTemplateVars(parts.join(" "));
+    assert.equal(Core.applyTemplate("keep {{v0}}", { v0: "OK" }), "keep OK");
+  });
+
+  it("ignores hostile template names", () => {
+    assert.deepEqual(Core.extractTemplateVars("{{__proto__}} {{constructor}} {{good}}"), ["good"]);
+    const hostile = Object.create(null);
+    hostile["__proto__"] = "x";
+    assert.equal(Core.applyTemplate("{{__proto__}}", hostile), "{{__proto__}}");
+    assert.equal(Core.isSafeTemplateVar("topic"), true);
+    assert.equal(Core.isSafeTemplateVar("x y"), false);
+  });
+});
+
+describe("store safety", () => {
+  it("rejects reserved and path-like prompt ids", () => {
+    assert.equal(Core.isSafePromptId("keep-me"), true);
+    assert.equal(Core.isSafePromptId("__proto__"), false);
+    assert.equal(Core.isSafePromptId("constructor"), false);
+    assert.equal(Core.isSafePromptId("../etc/passwd"), false);
+    assert.equal(Core.isSafePromptId("a\0b"), false);
+    const p = Core.sanitizePrompt({ id: "__proto__", title: "x" }, deps);
+    assert.notEqual(p.id, "__proto__");
+    assert.ok(p.id.startsWith("id-"));
+  });
+
+  it("mergePromptsById does not pollute Object.prototype", () => {
+    const merged = Core.mergePromptsById(
+      [{ id: "ok", title: "Keep" }],
+      [{ id: "__proto__", title: "Evil" }]
+    );
+    assert.equal(Object.prototype.title, undefined);
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].id, "ok");
+  });
+
+  it("mergeUsageFromDisk keeps edits and the higher useCount", () => {
+    const memory = [
+      { id: "a", title: "Edited", useCount: 2, lastUsedAt: "2026-01-01T00:00:00.000Z" },
+    ];
+    const disk = [
+      { id: "a", title: "Stale", useCount: 9, lastUsedAt: "2026-06-01T00:00:00.000Z" },
+    ];
+    const out = Core.mergeUsageFromDisk(memory, disk);
+    assert.equal(out[0].title, "Edited");
+    assert.equal(out[0].useCount, 9);
+    assert.equal(out[0].lastUsedAt, "2026-06-01T00:00:00.000Z");
+  });
+
+  it("enforces store limits and data-dir path sanity", () => {
+    assert.equal(Core.exceedsStoreLimits(Core.STORE_LIMITS.maxPrompts + 1, 10), "prompts");
+    assert.equal(Core.exceedsStoreLimits(1, Core.STORE_LIMITS.maxBytes + 1), "bytes");
+    assert.equal(Core.exceedsStoreLimits(1, 10), null);
+    assert.equal(Core.isUsableDataDirPath("/home/alex/vault"), true);
+    assert.equal(Core.isUsableDataDirPath("a\0b"), false);
+    assert.equal(Core.isUsableDataDirPath(""), false);
+    assert.equal(Core.isUsableDataDirPath("x".repeat(5000)), false);
+    // Trusted local path: `..` is allowed (USB/sync folders). Not a sandbox.
+    assert.equal(Core.isUsableDataDirPath("/home/alex/../../tmp"), true);
+  });
+
+  it("normalizeTags does not use a prototype-pollutable seen map", () => {
+    const tags = Core.normalizeTags(["__proto__", "ok", "constructor"]);
+    assert.ok(tags.includes("ok"));
+    assert.equal(Object.prototype.ok, undefined);
+    assert.equal(typeof Object.prototype.constructor, "function");
+  });
+});
+
+describe("shouldSeedSamples — missing prompts.json must not clobber recoveries", () => {
+  it("seeds only when the live file is gone AND no sibling JSON exists", () => {
+    assert.equal(Core.shouldSeedSamples(false, 0), true);
+    assert.equal(Core.shouldSeedSamples(false, 1), false);
+    assert.equal(Core.shouldSeedSamples(false, 2), false);
+    assert.equal(Core.shouldSeedSamples(true, 0), false);
+    assert.equal(Core.shouldSeedSamples(true, 9), false);
+  });
+
+  it("fails closed when the sibling count is unknown or hostile", () => {
+    assert.equal(Core.shouldSeedSamples(false, undefined), false);
+    assert.equal(Core.shouldSeedSamples(false, null), false);
+    assert.equal(Core.shouldSeedSamples(false, NaN), false);
+    assert.equal(Core.shouldSeedSamples(false, -1), false);
+    assert.equal(Core.shouldSeedSamples(false, "0"), false);
+    assert.equal(Core.shouldSeedSamples("yes", 0), false);
+    assert.equal(Core.shouldSeedSamples(undefined, 0), false);
+    assert.equal(Core.shouldSeedSamples(0, 0), false);
+  });
+});
+
+describe("countRecoverableVaultJson", () => {
+  it("counts backup/corrupt/export JSON and ignores the live file and lock junk", () => {
+    assert.equal(
+      Core.countRecoverableVaultJson([
+        "prompts.json",
+        "prompts.auto-backup.json",
+        "prompts.corrupt-2026-08-30_114949.json",
+        "prompts.json.lock",
+        "notes.txt",
+        "import.json",
+      ]),
+      3
+    );
+    assert.equal(Core.countRecoverableVaultJson([]), 0);
+    assert.equal(Core.countRecoverableVaultJson(null), 0);
+  });
+});
+
+describe("uniquifyPromptIds + sanitizePromptList", () => {
+  it("keeps the first id and rewrites later duplicates so delete-by-id cannot wipe two rows", () => {
+    let n = 0;
+    const uuid = () => `fresh-${++n}`;
+    const out = Core.uniquifyPromptIds(
+      [
+        { id: "dup", title: "First" },
+        { id: "dup", title: "Second" },
+        { id: "ok", title: "Third" },
+      ],
+      uuid
+    );
+    assert.equal(out[0].id, "dup");
+    assert.equal(out[0].title, "First");
+    assert.equal(out[1].id, "fresh-1");
+    assert.equal(out[1].title, "Second");
+    assert.equal(out[2].id, "ok");
+    assert.equal(new Set(out.map((p) => p.id)).size, 3);
+  });
+
+  it("retries uuid when the generator collides with an id already kept", () => {
+    let i = 0;
+    const uuid = () => {
+      i += 1;
+      if (i === 1) return "dup";
+      return "fresh";
+    };
+    const out = Core.uniquifyPromptIds([{ id: "dup", title: "A" }, { id: "dup", title: "B" }], uuid);
+    assert.equal(out[0].id, "dup");
+    assert.equal(out[1].id, "fresh");
+  });
+
+  it("requires a uuid function (fail closed)", () => {
+    assert.throws(() => Core.uniquifyPromptIds([{ id: "a" }]), /uuidFn/);
+    assert.throws(() => Core.uniquifyPromptIds([{ id: "a" }], null), /uuidFn/);
+  });
+
+  it("drops non-object import rows instead of minting Untitled junk", () => {
+    const out = Core.sanitizePromptList(
+      [null, 42, "x", { id: "keep", title: "Keep", content: "c" }],
+      deps
+    );
+    assert.equal(out.length, 1);
+    assert.equal(out[0].id, "keep");
+    assert.equal(out[0].title, "Keep");
+    assert.equal(out[0].content, "c");
+  });
+
+  it("uniquifies after sanitize so a duplicate-id import stays two prompts", () => {
+    const localDeps = {
+      uuid: (() => {
+        let n = 0;
+        return () => `u-${++n}`;
+      })(),
+      now: () => "2026-01-15T12:00:00.000Z",
+    };
+    const out = Core.sanitizePromptList(
+      [
+        { id: "same", title: "A", content: "a" },
+        { id: "same", title: "B", content: "b" },
+      ],
+      localDeps
+    );
+    assert.equal(out.length, 2);
+    assert.equal(out[0].id, "same");
+    assert.notEqual(out[1].id, "same");
+    assert.equal(out[1].title, "B");
+  });
+
+  it("returns empty for a non-array payload", () => {
+    assert.deepEqual(Core.sanitizePromptList(null, deps), []);
+    assert.deepEqual(Core.sanitizePromptList({ prompts: [] }, deps), []);
+  });
+
+  it("requires uuid/now deps (fail closed)", () => {
+    assert.throws(() => Core.sanitizePromptList([], {}), /deps\.uuid/);
+    assert.throws(() => Core.sanitizePromptList([{ id: "x" }]), /deps\.uuid/);
+  });
+});
+
+describe("shouldTrapTab — WCAG 2.1.2 no keyboard trap in list view", () => {
+  it("propagates Tab when the focus chain is empty; traps only when there are fields", () => {
+    assert.equal(Core.shouldTrapTab(0), false);
+    assert.equal(Core.shouldTrapTab(1), true);
+    assert.equal(Core.shouldTrapTab(3), true);
+    assert.equal(Core.shouldTrapTab(-1), false);
+    assert.equal(Core.shouldTrapTab(NaN), false);
+    assert.equal(Core.shouldTrapTab(undefined), false);
+  });
 });
 
 describe("layout metrics (responsive chrome)", () => {

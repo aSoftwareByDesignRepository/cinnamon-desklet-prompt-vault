@@ -13,14 +13,19 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 DEFAULT_DATA_DIR = Path.home() / ".local" / "share" / "prompt-vault@alex"
 PROMPTS_FILE = "prompts.json"
+LOCK_DIR_NAME = "prompts.json.lockdir"
 MIN_SLOT = 1
 MAX_SLOT = 9
+MAX_STORE_BYTES = 5 * 1024 * 1024
+MAX_PROMPTS = 500
+MAX_CONTENT = 100000
 
 
 def _iso_now() -> str:
@@ -40,6 +45,52 @@ def _data_dir() -> Path:
 
 def _prompts_path() -> Path:
     return _data_dir() / PROMPTS_FILE
+
+
+def _lock_dir(prompts_path: Path) -> Path:
+    return prompts_path.parent / LOCK_DIR_NAME
+
+
+@contextmanager
+def _file_lock(prompts_path: Path, exclusive: bool = True) -> Iterator[None]:
+    """Directory lock so the GJS desklet can take the same lock (mkdir).
+
+    `exclusive` is kept for call-site compatibility; mkdir is always exclusive.
+    """
+    del exclusive
+    lockdir = _lock_dir(prompts_path)
+    lockdir.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    deadline = time.time() + 5.0
+    while True:
+        try:
+            lockdir.mkdir(mode=0o700)
+            break
+        except FileExistsError:
+            if time.time() >= deadline:
+                try:
+                    age = time.time() - lockdir.stat().st_mtime
+                except OSError:
+                    age = 999.0
+                if age > 10:
+                    try:
+                        lockdir.rmdir()
+                        continue
+                    except OSError:
+                        pass
+                raise TimeoutError("could not lock prompts store")
+            time.sleep(0.025)
+    try:
+        yield
+    finally:
+        try:
+            lockdir.rmdir()
+        except OSError:
+            pass
+
+
+def _reject_huge(path: Path) -> None:
+    if path.is_file() and path.stat().st_size > MAX_STORE_BYTES:
+        raise ValueError("prompts file is too large")
 
 
 def _load_json_locked(path: Path) -> dict[str, Any]:
@@ -94,6 +145,23 @@ def _find_by_slot(prompts: list[dict[str, Any]], slot: int) -> dict[str, Any] | 
     return None
 
 
+def _apply_copy_usage(prompts: list, copied_id: Any, now: str) -> list[dict[str, Any]]:
+    """Increment useCount on copied_id; keep every other prompt (including ones added on disk)."""
+    out: list[dict[str, Any]] = []
+    for p in prompts:
+        if not isinstance(p, dict):
+            continue
+        q = dict(p)
+        if copied_id is not None and q.get("id") == copied_id:
+            q["lastUsedAt"] = now
+            try:
+                q["useCount"] = int(q.get("useCount") or 0) + 1
+            except (TypeError, ValueError):
+                q["useCount"] = 1
+        out.append(q)
+    return out
+
+
 def _session_env() -> dict[str, str]:
     """Best-effort session vars when launched from a Cinnamon custom shortcut."""
     env = os.environ.copy()
@@ -114,11 +182,16 @@ def _copy_via_gtk(text: str, env: dict[str, str]) -> None:
 
     if not Gtk.init_check([]):
         raise RuntimeError("Gtk could not connect to the display for clipboard access.")
-    clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-    clipboard.set_text(text, -1)
-    clipboard.store()
-    while Gtk.events_pending():
-        Gtk.main_iteration()
+    for selection in (Gdk.SELECTION_CLIPBOARD, Gdk.SELECTION_PRIMARY):
+        clipboard = Gtk.Clipboard.get(selection)
+        clipboard.set_text(text, -1)
+        clipboard.store()
+    # Let the session clipboard manager take ownership before we exit.
+    deadline = time.time() + 0.25
+    while time.time() < deadline:
+        while Gtk.events_pending():
+            Gtk.main_iteration()
+        time.sleep(0.02)
 
 
 def _copy_to_clipboard(text: str) -> None:
@@ -156,13 +229,82 @@ def _release_hotkey_modifiers(env: dict[str, str]) -> None:
     """Release keys held by the shortcut chord so simulated Ctrl+V is not swallowed."""
     if env.get("WAYLAND_DISPLAY"):
         return
-    if not shutil_which("xdotool"):
+    if shutil_which("xdotool"):
+        subprocess.run(
+            ["xdotool", "keyup", "super", "ctrl", "shift", "alt", "Meta_L", "Meta_R"],
+            check=False,
+            env=env,
+        )
         return
-    subprocess.run(
-        ["xdotool", "keyup", "super", "ctrl", "shift", "alt", "Meta_L", "Meta_R"],
-        check=False,
-        env=env,
-    )
+    try:
+        _xlib_keyup(
+            env,
+            (
+                "Super_L",
+                "Super_R",
+                "Control_L",
+                "Control_R",
+                "Shift_L",
+                "Shift_R",
+                "Alt_L",
+                "Alt_R",
+                "Meta_L",
+                "Meta_R",
+            ),
+        )
+    except Exception:
+        pass
+
+
+def _xlib_display(env: dict[str, str]):
+    os.environ.update({k: v for k, v in env.items() if v is not None})
+    from Xlib.display import Display
+
+    return Display(env.get("DISPLAY") or os.environ.get("DISPLAY") or ":0")
+
+
+def _xlib_keycode(disp, name: str) -> int:
+    from Xlib import XK
+
+    keysym = XK.string_to_keysym(name)
+    if not keysym:
+        raise RuntimeError(f"Unknown key {name}")
+    code = disp.keysym_to_keycode(keysym)
+    if not code:
+        raise RuntimeError(f"No keycode for {name}")
+    return code
+
+
+def _xlib_keyup(env: dict[str, str], names: tuple[str, ...]) -> None:
+    from Xlib import X
+    from Xlib.ext import xtest
+
+    disp = _xlib_display(env)
+    for name in names:
+        try:
+            xtest.fake_input(disp, X.KeyRelease, _xlib_keycode(disp, name))
+        except Exception:
+            continue
+    disp.sync()
+
+
+def _paste_via_xlib(env: dict[str, str]) -> None:
+    """Send Ctrl+V with the XTEST extension (no xdotool required)."""
+    from Xlib import X
+    from Xlib.ext import xtest
+
+    disp = _xlib_display(env)
+    ext = disp.query_extension("XTEST")
+    if not ext or not ext.present:
+        raise RuntimeError("XTEST extension is not available.")
+
+    ctrl = _xlib_keycode(disp, "Control_L")
+    vee = _xlib_keycode(disp, "v")
+    xtest.fake_input(disp, X.KeyPress, ctrl)
+    xtest.fake_input(disp, X.KeyPress, vee)
+    xtest.fake_input(disp, X.KeyRelease, vee)
+    xtest.fake_input(disp, X.KeyRelease, ctrl)
+    disp.sync()
 
 
 def _paste_clipboard(env: dict[str, str]) -> None:
@@ -190,7 +332,14 @@ def _paste_clipboard(env: dict[str, str]) -> None:
             env=env,
         )
         return
-    raise RuntimeError("Install xdotool for auto-paste on X11 (sudo apt install xdotool).")
+    try:
+        _paste_via_xlib(env)
+        return
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not auto-paste. Install xdotool (sudo apt install xdotool) "
+            f"or python3-xlib ({exc})."
+        ) from exc
 
 
 def shutil_which(cmd: str) -> str | None:
@@ -218,8 +367,17 @@ def cmd_list_slots(path: Path) -> int:
     if not path.is_file():
         print(f"No prompts file at {path}", file=sys.stderr)
         return 1
-    data = _load_json_locked(path)
-    prompts = _parse_prompts(data)
+    try:
+        with _file_lock(path, exclusive=False):
+            _reject_huge(path)
+            data = _load_json_locked(path)
+            prompts = _parse_prompts(data)
+    except Exception as exc:
+        print(f"Could not read prompts: {exc}", file=sys.stderr)
+        return 1
+    if len(prompts) > MAX_PROMPTS:
+        print("Too many prompts in file.", file=sys.stderr)
+        return 1
     print(f"Prompt Vault slots ({MIN_SLOT}-{MAX_SLOT}):")
     for slot in range(MIN_SLOT, MAX_SLOT + 1):
         p = _find_by_slot(prompts, slot)
@@ -241,28 +399,57 @@ def cmd_copy_slot(path: Path, slot: int, quiet: bool, paste: bool) -> int:
         print(f"No prompts file at {path}", file=sys.stderr)
         return 1
 
-    data = _load_json_locked(path)
-    prompts = _parse_prompts(data)
-    prompt = _find_by_slot(prompts, slot)
-
-    if not prompt:
-        _notify("Prompt Vault", f"No prompt assigned to slot {slot}.")
-        if not quiet:
-            print(f"Slot {slot} is empty. Assign a slot in Prompt Vault → Edit.", file=sys.stderr)
-        return 3
-
-    content = str(prompt.get("content", ""))
-    if not content.strip():
-        _notify("Prompt Vault", f"Slot {slot} prompt has no text.")
-        print("Prompt content is empty.", file=sys.stderr)
-        return 4
-
     try:
-        _copy_to_clipboard(content)
-    except Exception as exc:
-        _notify("Prompt Vault", "Could not copy to clipboard.")
-        print(f"Clipboard error: {exc}", file=sys.stderr)
-        return 5
+        with _file_lock(path, exclusive=True):
+            _reject_huge(path)
+            data = _load_json_locked(path)
+            prompts = _parse_prompts(data)
+            if len(prompts) > MAX_PROMPTS:
+                raise ValueError("too many prompts")
+            prompt = _find_by_slot(prompts, slot)
+
+            if not prompt:
+                _notify("Prompt Vault", f"No prompt assigned to slot {slot}.")
+                if not quiet:
+                    print(f"Slot {slot} is empty. Assign a slot in Prompt Vault → Edit.", file=sys.stderr)
+                return 3
+
+            content = str(prompt.get("content", ""))
+            if len(content) > MAX_CONTENT:
+                content = content[:MAX_CONTENT]
+            if not content.strip():
+                _notify("Prompt Vault", f"Slot {slot} prompt has no text.")
+                print("Prompt content is empty.", file=sys.stderr)
+                return 4
+
+            try:
+                _copy_to_clipboard(content)
+            except Exception as exc:
+                _notify("Prompt Vault", "Could not copy to clipboard.")
+                print(f"Clipboard error: {exc}", file=sys.stderr)
+                return 5
+
+            now = _iso_now()
+            copied_id = prompt.get("id")
+            # Re-read under the same lock. The desklet may have written without
+            # the lock (older builds); never write back the stale snapshot.
+            try:
+                latest_data = _load_json_locked(path)
+                latest = _parse_prompts(latest_data)
+            except Exception:
+                latest_data = data
+                latest = prompts
+            latest = _apply_copy_usage(latest, copied_id, now)
+            if isinstance(latest_data, dict):
+                latest_data["prompts"] = latest
+                _save_json_locked(path, latest_data)
+            else:
+                _save_json_locked(path, {"version": 1, "exportedAt": now, "prompts": latest})
+            title = str(prompt.get("title", "Untitled")).strip() or "Untitled"
+    except ValueError as exc:
+        _notify("Prompt Vault", str(exc))
+        print(str(exc), file=sys.stderr)
+        return 1
 
     pasted = False
     if paste:
@@ -271,7 +458,6 @@ def cmd_copy_slot(path: Path, slot: int, quiet: bool, paste: bool) -> int:
             _paste_clipboard(_session_env())
             pasted = True
         except Exception as exc:
-            title = str(prompt.get("title", "Untitled")).strip() or "Untitled"
             _notify(
                 "Prompt Vault",
                 f"Copied “{title}” but could not auto-paste. Press Ctrl+V. ({exc})",
@@ -279,20 +465,6 @@ def cmd_copy_slot(path: Path, slot: int, quiet: bool, paste: bool) -> int:
             if not quiet:
                 print(f"Paste error: {exc}", file=sys.stderr)
 
-    # Update usage stats (exclusive lock via rewrite).
-    now = _iso_now()
-    for p in prompts:
-        if p is prompt or p.get("id") == prompt.get("id"):
-            p["lastUsedAt"] = now
-            p["useCount"] = int(p.get("useCount") or 0) + 1
-            break
-    if isinstance(data, dict):
-        data["prompts"] = prompts
-        _save_json_locked(path, data)
-    else:
-        _save_json_locked(path, {"version": 1, "exportedAt": now, "prompts": prompts})
-
-    title = str(prompt.get("title", "Untitled")).strip() or "Untitled"
     if not paste or pasted:
         action = "Pasted" if pasted else "Copied"
         _notify("Prompt Vault", f"{action} “{title}” (slot {slot})")

@@ -7,7 +7,7 @@
     "type": "entry",
     "default": "",
     "description": "Data folder",
-    "tooltip": "Where prompts.json and backups are stored. Leave empty to use ~/.local/share/prompt-vault@alex/. You may use ~ for your home folder. Put a file named import.json here to import it."
+    "tooltip": "Where prompts.json and backups are stored. Leave empty to use ~/.local/share/prompt-vault@alex/. You may use ~ for your home folder. Click Import and pick any .json backup from this folder."
   },
   "auto_backup": {
     "type": "switch",

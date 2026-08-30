@@ -6,8 +6,6 @@ set -euo pipefail
 
 HOTKEY_CMD="${PROMPT_VAULT_HOTKEY_CMD:-${HOME}/.local/bin/prompt-vault-hotkey}"
 DATA_DIR="${PROMPT_VAULT_DATA_DIR:-}"
-KEYBIND_SCHEMA="org.cinnamon.desktop.keybindings"
-CUSTOM_LIST_KEY="custom-list"
 # Super+Ctrl+1–9 avoids conflicts with Super+1–9 (app switch) and Super+Shift+* (Mint/Cinnamon).
 KEY_COMBO="${PROMPT_VAULT_KEY_COMBO:-Super+Ctrl}"
 
@@ -35,8 +33,8 @@ if [[ ! -x "${HOTKEY_CMD}" ]]; then
   exit 1
 fi
 
-if ! command -v gsettings >/dev/null 2>&1; then
-  echo "error: gsettings is required (Cinnamon)." >&2
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "error: python3 is required to register Cinnamon shortcuts." >&2
   exit 1
 fi
 
@@ -69,61 +67,68 @@ if [[ -z "${COMBO_PREFIX}" ]]; then
   exit 1
 fi
 
-mapfile -t EXISTING < <(gsettings get "${KEYBIND_SCHEMA}" "${CUSTOM_LIST_KEY}" | tr -d "[]'" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -v '^$' || true)
+export PROMPT_VAULT_HOTKEY_CMD="${HOTKEY_CMD}"
+export PROMPT_VAULT_DATA_DIR="${DATA_DIR}"
+export PROMPT_VAULT_COMBO_PREFIX="${COMBO_PREFIX}"
 
-add_to_list() {
-  local id="$1"
-  local found=0
-  for e in "${EXISTING[@]:-}"; do
-    if [[ "${e}" == "${id}" ]]; then
-      found=1
-      break
-    fi
-  done
-  if [[ "${found}" -eq 0 ]]; then
-    EXISTING+=("${id}")
-  fi
-}
+python3 - <<'PY'
+# Register relocatable custom-keybinding schemas. Do not parse `gsettings get`
+# with tr -d "[]'" — an empty list is `@as []`, which that turns into a bogus
+# `@as` id and can leave Cinnamon's custom-list unusable.
+from __future__ import annotations
 
-hotkey_q="$(printf '%q' "${HOTKEY_CMD}")"
+import os
+import shlex
+import sys
 
-for slot in $(seq 1 9); do
-  id="prompt-vault-slot${slot}"
-  schema="${KEYBIND_SCHEMA}.custom-keybinding:/org/cinnamon/desktop/keybindings/custom-keybindings/${id}/"
-  binding="['${COMBO_PREFIX}${slot}']"
+try:
+    import gi
 
-  add_to_list "${id}"
+    gi.require_version("Gio", "2.0")
+    from gi.repository import Gio
+except Exception as exc:  # pragma: no cover - environment
+    sys.stderr.write(f"error: python3-gi (Gio) is required: {exc}\n")
+    sys.exit(1)
 
-  if [[ -n "${DATA_DIR}" ]]; then
-    data_q="$(printf '%q' "${DATA_DIR}")"
-    cmd="env PROMPT_VAULT_DATA_DIR=${data_q} ${hotkey_q} ${slot}"
-  else
-    cmd="${hotkey_q} ${slot}"
-  fi
+PARENT = "org.cinnamon.desktop.keybindings"
+CHILD = "org.cinnamon.desktop.keybindings.custom-keybinding"
+BASE = "/org/cinnamon/desktop/keybindings/custom-keybindings/"
+JUNK_IDS = {"", "@as", "__dummy__"}
 
-  gsettings set "${schema}" name "Prompt Vault: Slot ${slot}"
-  gsettings set "${schema}" command "${cmd}"
-  gsettings set "${schema}" binding "${binding}"
-done
+hotkey = os.environ["PROMPT_VAULT_HOTKEY_CMD"]
+data_dir = os.environ.get("PROMPT_VAULT_DATA_DIR", "").strip()
+combo = os.environ["PROMPT_VAULT_COMBO_PREFIX"]
 
-if [[ "${#EXISTING[@]}" -eq 0 ]]; then
-  gsettings set "${KEYBIND_SCHEMA}" "${CUSTOM_LIST_KEY}" "['prompt-vault-slot1', 'prompt-vault-slot2', 'prompt-vault-slot3', 'prompt-vault-slot4', 'prompt-vault-slot5', 'prompt-vault-slot6', 'prompt-vault-slot7', 'prompt-vault-slot8', 'prompt-vault-slot9']"
-else
-  joined=""
-  for id in "${EXISTING[@]}"; do
-    [[ -z "${id}" ]] && continue
-    if [[ -n "${joined}" ]]; then
-      joined+=", "
-    fi
-    joined+="'${id}'"
-  done
-  gsettings set "${KEYBIND_SCHEMA}" "${CUSTOM_LIST_KEY}" "[${joined}]"
-fi
+kb = Gio.Settings.new(PARENT)
+existing = [i for i in kb.get_strv("custom-list") if i not in JUNK_IDS]
+
+for slot in range(1, 10):
+    ident = f"prompt-vault-slot{slot}"
+    if ident not in existing:
+        existing.append(ident)
+    settings = Gio.Settings.new_with_path(CHILD, f"{BASE}{ident}/")
+    cmd = f"{shlex.quote(hotkey)} {slot}"
+    if data_dir:
+        cmd = f"env PROMPT_VAULT_DATA_DIR={shlex.quote(data_dir)} {cmd}"
+    settings.set_string("name", f"Prompt Vault: Slot {slot}")
+    settings.set_string("command", cmd)
+    settings.set_strv("binding", [f"{combo}{slot}"])
 
 # Cinnamon reloads custom shortcut commands only when custom-list changes.
-saved_list="$(gsettings get "${KEYBIND_SCHEMA}" "${CUSTOM_LIST_KEY}")"
-gsettings set "${KEYBIND_SCHEMA}" "${CUSTOM_LIST_KEY}" "['__dummy__']"
-gsettings set "${KEYBIND_SCHEMA}" "${CUSTOM_LIST_KEY}" "${saved_list}"
+kb.set_strv("custom-list", existing)
+kb.set_strv("custom-list", ["__dummy__"])
+kb.set_strv("custom-list", existing)
+Gio.Settings.sync()
+
+final = [i for i in kb.get_strv("custom-list") if i not in JUNK_IDS]
+missing = [f"prompt-vault-slot{n}" for n in range(1, 10) if f"prompt-vault-slot{n}" not in final]
+if missing:
+    sys.stderr.write("error: failed to register shortcuts: " + ", ".join(missing) + "\n")
+    sys.exit(1)
+if "@as" in kb.get_strv("custom-list"):
+    sys.stderr.write("error: custom-list still contains invalid id @as\n")
+    sys.exit(1)
+PY
 
 echo "Prompt Vault keyboard shortcuts installed:"
 echo "  ${KEY_COMBO}+1 … ${KEY_COMBO}+9  →  paste slot 1 … 9 into the focused field"
@@ -132,6 +137,10 @@ echo "Focus a text field first, then press the shortcut."
 echo "Change combos: Settings → Keyboard → Custom Shortcuts (Prompt Vault: Slot N)"
 echo "Assign prompts: Prompt Vault → Edit prompt → Shortcut slot"
 echo
-if ! command -v xdotool >/dev/null 2>&1 && [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
-  echo "Note: install xdotool for auto-paste on X11: sudo apt install xdotool"
+if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+  if ! command -v wtype >/dev/null 2>&1 && ! command -v ydotool >/dev/null 2>&1; then
+    echo "Note: install wtype or ydotool for auto-paste on Wayland."
+  fi
+elif ! command -v xdotool >/dev/null 2>&1; then
+  echo "Note: auto-paste uses X11 (python3-xlib). Optional: sudo apt install xdotool"
 fi

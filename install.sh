@@ -66,7 +66,7 @@ echo "Next:"
 echo "  1. Right-click the desktop → 'Add Desklets' → Prompt Vault → Add."
 echo "  2. Edit prompts → pick shortcut slot 1–9 → click Shortcuts (toolbar)."
 echo "  3. Focus a text field → press Super+Ctrl+1–9 to paste that slot."
-echo "  4. X11 auto-paste needs xdotool: sudo apt install xdotool"
+echo "  4. Auto-paste on X11 uses python3-xlib (optional: sudo apt install xdotool)."
 echo "  5. If the desklet does not appear, reload Cinnamon (Ctrl+Alt+Esc) or log out/in."
 
 if [[ "${INSTALL_SHORTCUTS}" -eq 1 ]]; then
